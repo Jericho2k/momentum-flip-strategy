@@ -23,23 +23,23 @@ import math
 @dataclass
 class StrategyParams:
     # MACD
-    macd_fast:   int   = 10
-    macd_slow:   int   = 28
-    macd_signal: int   = 3
-    min_hist_pips: float = 3.3   # minimum histogram value to take signal
+    macd_fast:   int   = 8
+    macd_slow:   int   = 21
+    macd_signal: int   = 9
+    min_hist_pips: float = 0.1   # minimum histogram value to take signal
 
     # ADX
     adx_period: int   = 14
-    adx_level:  float = 45.0    # only trade when ADX >= this
+    adx_level:  float = 25.0    # only trade when ADX >= this
 
     # Session filter (UTC hours, set None to disable)
-    session_start: Optional[int] = 10   # 10:00 UTC ≈ 13:00 Moscow
-    session_end:   Optional[int] = 18   # 18:00 UTC ≈ 21:00 Moscow
-    morning_stop:  bool = True          # reverse/close at session open
+    session_start: Optional[int] = None
+    session_end:   Optional[int] = None
+    morning_stop:  bool = False
 
     # Risk
-    sl_pips:      float = 0.0037        # hard stop in price units (0 = disabled)
-    leverage:     int   = 3
+    sl_pips:      float = 0.0          # hard stop in price units (0 = disabled)
+    leverage:     int   = 2
 
 
 # ── Indicator calculations ─────────────────────────────────────────────────────
