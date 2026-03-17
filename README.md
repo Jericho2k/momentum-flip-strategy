@@ -22,14 +22,19 @@ Solana perpetual futures trading system on Bybit with OpenClaw AI oversight.
 
 Start on testnet first — set TESTNET=True in bybit_bridge.py (it is by default).
 
-**Live bot:**
+**MACD/ADX bot (validated, recommended for testnet):**
 ```bash
-python bot/bybit_bridge.py
+python bot/macd_adx_bridge.py
 ```
 
-**OpenClaw oversight agent** (run alongside the bot in a second terminal):
+**OpenClaw oversight agent** (run in a second terminal alongside either bot):
 ```bash
 python bot/openclaw_agent.py
+```
+
+**Hybrid EMA/sentiment bot:**
+```bash
+python bot/bybit_bridge.py
 ```
 
 **Backtester CLI:**
