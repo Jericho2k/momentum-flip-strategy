@@ -17,7 +17,10 @@ from datetime import datetime, timezone
 
 import requests
 
-from macd_adx_strategy import Bar, Signal, StrategyParams, generate_signals
+try:
+    from backtest.macd_adx_strategy import Bar, Signal, StrategyParams, generate_signals
+except ModuleNotFoundError:
+    from macd_adx_strategy import Bar, Signal, StrategyParams, generate_signals
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("backtester")
