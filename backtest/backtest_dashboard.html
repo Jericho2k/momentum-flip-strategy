@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SOL/USDT · MACD/ADX Backtester</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  :root {
+    --bg:      #0f1117;
+    --surface: #181c27;
+    --card:    #1e2235;
+    --border:  rgba(255,255,255,0.07);
+    --text:    #e8eaf0;
+    --muted:   #7a7f96;
+    --green:   #26d97f;
+    --red:     #f05c5c;
+    --blue:    #4da6ff;
+    --amber:   #f5a623;
+    --font:    'SF Mono', 'Fira Code', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; }
+
+  header {
+    padding: 18px 24px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: baseline; gap: 16px;
+  }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: .03em; color: var(--text); }
+  header span { font-size: 11px; color: var(--muted); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+  .layout { display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 53px); }
+
+  /* ── Sidebar ── */
+  aside {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    padding: 16px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .section-title { font-size: 10px; font-weight: 600; color: var(--muted); letter-spacing: .1em; text-transform: uppercase; margin-bottom: 6px; }
+  .param-group { background: var(--card); border-radius: 8px; padding: 12px; }
+  .param-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px; }
+  .param-row:last-child { margin-bottom: 0; }
+  label { font-size: 11px; color: var(--muted); }
+  input[type=number] {
+    width: 72px; background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); padding: 4px 8px; border-radius: 4px;
+    font-family: var(--font); font-size: 12px; text-align: right;
+  }
+  input[type=number]:focus { outline: none; border-color: var(--blue); }
+  input[type=checkbox] { width: 14px; height: 14px; accent-color: var(--blue); cursor: pointer; }
+
+  .run-btn {
+    background: var(--blue); color: #fff; border: none; border-radius: 6px;
+    padding: 10px; font-family: var(--font); font-size: 13px; font-weight: 600;
+    cursor: pointer; width: 100%; letter-spacing: .04em;
+  }
+  .run-btn:hover { background: #3a94f5; }
+  .run-btn:disabled { background: #2a3a55; color: var(--muted); cursor: not-allowed; }
+
+  .opt-btn {
+    background: transparent; color: var(--amber); border: 1px solid var(--amber);
+    border-radius: 6px; padding: 8px; font-family: var(--font); font-size: 12px;
+    cursor: pointer; width: 100%;
+  }
+  .opt-btn:hover { background: rgba(245,166,35,.08); }
+  .opt-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+  .profile-list { display: flex; flex-direction: column; gap: 5px; max-height: 160px; overflow-y: auto; }
+  .profile-item {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+    padding: 7px 9px; cursor: pointer; display: flex; justify-content: space-between;
+    align-items: center; font-size: 11px;
+  }
+  .profile-item:hover { border-color: var(--blue); }
+  .profile-item .pnl { font-weight: 600; }
+  .profile-item .pnl.pos { color: var(--green); }
+  .profile-item .pnl.neg { color: var(--red); }
+  .save-btn {
+    background: transparent; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 5px; padding: 6px 10px; font-family: var(--font); font-size: 11px;
+    cursor: pointer; width: 100%;
+  }
+  .save-btn:hover { color: var(--text); border-color: var(--text); }
+
+  /* ── Main area ── */
+  main { padding: 16px; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; }
+
+  .metrics { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; }
+  .metric { background: var(--card); border-radius: 8px; padding: 11px 12px; }
+  .metric-label { font-size: 10px; color: var(--muted); margin-bottom: 5px; }
+  .metric-value { font-size: 18px; font-weight: 600; }
+  .metric-value.pos { color: var(--green); }
+  .metric-value.neg { color: var(--red); }
+  .metric-value.neu { color: var(--blue); }
+  .metric-value.warn { color: var(--amber); }
+
+  .chart-card { background: var(--card); border-radius: 8px; padding: 14px; }
+  .chart-title { font-size: 11px; color: var(--muted); margin-bottom: 10px; letter-spacing: .06em; text-transform: uppercase; }
+  .charts-row { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  th { color: var(--muted); text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); font-weight: 400; }
+  td { padding: 5px 8px; border-bottom: 1px solid rgba(255,255,255,.03); }
+  tr:hover td { background: rgba(255,255,255,.02); }
+  .long { color: var(--green); } .short { color: var(--red); }
+
+  .opt-results { background: var(--card); border-radius: 8px; padding: 14px; }
+  .opt-row { display: flex; justify-content: space-between; align-items: center; padding: 7px 10px; border-radius: 5px; cursor: pointer; margin-bottom: 3px; }
+  .opt-row:hover { background: rgba(77,166,255,.07); }
+  .opt-row.best { border: 1px solid rgba(77,166,255,.3); background: rgba(77,166,255,.05); }
+  .tag { font-size: 10px; padding: 2px 7px; border-radius: 10px; }
+  .tag.green { background: rgba(38,217,127,.15); color: var(--green); }
+  .tag.amber { background: rgba(245,166,35,.15); color: var(--amber); }
+
+  .status-bar { font-size: 11px; color: var(--muted); padding: 6px 0; min-height: 20px; }
+  .status-bar.running { color: var(--blue); }
+  .status-bar.done    { color: var(--green); }
+  .status-bar.error   { color: var(--red); }
+
+  ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>SOL/USDT · MACD/ADX Backtester</h1>
+  <span class="dot"></span>
+  <span>Bybit perpetual · H1 · up to 365 days</span>
+</header>
+
+<div class="layout">
+
+<!-- ── Sidebar ── -->
+<aside>
+  <div>
+    <div class="section-title">MACD parameters</div>
+    <div class="param-group">
+      <div class="param-row"><label>Fast (Б)</label><input type="number" id="macd_fast" value="10" min="2" max="50"></div>
+      <div class="param-row"><label>Slow (М)</label><input type="number" id="macd_slow" value="28" min="5" max="100"></div>
+      <div class="param-row"><label>Signal (С)</label><input type="number" id="macd_signal" value="3" min="1" max="20"></div>
+      <div class="param-row"><label>Min histogram (П-ы)</label><input type="number" id="min_hist" value="3.3" min="0" step="0.1"></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="section-title">ADX parameters</div>
+    <div class="param-group">
+      <div class="param-row"><label>Period</label><input type="number" id="adx_period" value="14" min="5" max="30"></div>
+      <div class="param-row"><label>Min level (Ур)</label><input type="number" id="adx_level" value="45" min="10" max="80"></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="section-title">Session / risk</div>
+    <div class="param-group">
+      <div class="param-row"><label>Session start (UTC h)</label><input type="number" id="sess_start" value="10" min="0" max="23"></div>
+      <div class="param-row"><label>Session end (UTC h)</label><input type="number" id="sess_end" value="18" min="0" max="23"></div>
+      <div class="param-row"><label>Morning stop</label><input type="checkbox" id="morning_stop" checked></div>
+      <div class="param-row"><label>SL $ (0=off)</label><input type="number" id="sl_pips" value="0" min="0" step="0.5"></div>
+      <div class="param-row"><label>Leverage</label><input type="number" id="leverage" value="3" min="1" max="5"></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="section-title">Data</div>
+    <div class="param-group">
+      <div class="param-row"><label>History (days)</label><input type="number" id="days" value="365" min="30" max="730"></div>
+    </div>
+  </div>
+
+  <button class="run-btn" id="runBtn" onclick="runBacktest()">&#9654; Run backtest</button>
+  <button class="opt-btn" id="optBtn" onclick="runOptimizer()">&#9733; Optimize parameters</button>
+
+  <div>
+    <div class="section-title">Saved profiles</div>
+    <div class="profile-list" id="profileList"></div>
+    <button class="save-btn" onclick="saveProfile()" style="margin-top:6px">+ Save current result</button>
+  </div>
+
+  <div class="status-bar" id="status">Ready.</div>
+</aside>
+
+<!-- ── Main ── -->
+<main>
+
+  <!-- Metrics -->
+  <div class="metrics">
+    <div class="metric"><div class="metric-label">Total PnL</div><div class="metric-value neu" id="m_pnl">—</div></div>
+    <div class="metric"><div class="metric-label">Win rate</div><div class="metric-value" id="m_wr">—</div></div>
+    <div class="metric"><div class="metric-label">Total trades</div><div class="metric-value neu" id="m_trades">—</div></div>
+    <div class="metric"><div class="metric-label">Profit factor</div><div class="metric-value" id="m_pf">—</div></div>
+    <div class="metric"><div class="metric-label">Max drawdown</div><div class="metric-value" id="m_dd">—</div></div>
+    <div class="metric"><div class="metric-label">Sharpe</div><div class="metric-value" id="m_sharpe">—</div></div>
+    <div class="metric"><div class="metric-label">Flat months</div><div class="metric-value warn" id="m_flat">—</div></div>
+  </div>
+
+  <!-- Charts row -->
+  <div class="charts-row">
+    <div class="chart-card">
+      <div class="chart-title">Cumulative PnL %</div>
+      <div style="position:relative;height:200px"><canvas id="pnlChart"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Monthly PnL %</div>
+      <div style="position:relative;height:200px"><canvas id="monthChart"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Trade table -->
+  <div class="chart-card">
+    <div class="chart-title">Recent trades (last 30)</div>
+    <div style="max-height:220px;overflow-y:auto">
+      <table id="tradeTable">
+        <thead><tr>
+          <th>#</th><th>Entry</th><th>Exit</th><th>Dir</th>
+          <th>Entry $</th><th>Exit $</th><th>PnL %</th><th>Bars</th><th>Reason</th>
+        </tr></thead>
+        <tbody id="tradeBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Optimizer results -->
+  <div class="opt-results" id="optSection" style="display:none">
+    <div class="chart-title">Optimizer results — top 10 by Sharpe</div>
+    <div id="optRows"></div>
+  </div>
+
+</main>
+</div>
+
+<script>
+// ── In-memory profiles ────────────────────────────────────────────────────────
+let profiles = [];
+let lastResult = null;
+let pnlChartInst = null, monthChartInst = null;
+
+function getParams() {
+  return {
+    macd_fast:     +document.getElementById('macd_fast').value,
+    macd_slow:     +document.getElementById('macd_slow').value,
+    macd_signal:   +document.getElementById('macd_signal').value,
+    min_hist_pips: +document.getElementById('min_hist').value,
+    adx_period:    +document.getElementById('adx_period').value,
+    adx_level:     +document.getElementById('adx_level').value,
+    session_start: +document.getElementById('sess_start').value,
+    session_end:   +document.getElementById('sess_end').value,
+    morning_stop:  document.getElementById('morning_stop').checked,
+    sl_pips:       +document.getElementById('sl_pips').value,
+    leverage:      +document.getElementById('leverage').value,
+    days:          +document.getElementById('days').value,
+  };
+}
+
+function setStatus(msg, cls) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'status-bar ' + (cls||'');
+}
+
+// ── MACD / ADX pure JS implementations ───────────────────────────────────────
+
+function emaArr(prices, period) {
+  const k = 2 / (period + 1);
+  const out = new Array(prices.length).fill(NaN);
+  let seed = prices.slice(0, period).reduce((a,b)=>a+b,0)/period;
+  out[period-1] = seed;
+  for (let i = period; i < prices.length; i++) {
+    out[i] = prices[i]*k + out[i-1]*(1-k);
+  }
+  return out;
+}
+
+function macdHistogram(closes, fast, slow, signal) {
+  const fe = emaArr(closes, fast);
+  const se = emaArr(closes, slow);
+  const macdLine = closes.map((_,i) => isNaN(fe[i])||isNaN(se[i]) ? NaN : fe[i]-se[i]);
+  const validMacd = macdLine.filter(v=>!isNaN(v));
+  const sigEma = emaArr(validMacd, signal);
+  let vi = 0;
+  const sigLine = macdLine.map(v => isNaN(v) ? NaN : sigEma[vi++] ?? NaN);
+  return macdLine.map((m,i) => isNaN(m)||isNaN(sigLine[i]) ? NaN : m-sigLine[i]);
+}
+
+function adxArr(highs, lows, closes, period) {
+  const n = closes.length;
+  const out = new Array(n).fill(NaN);
+  const trs=[], pdms=[], ndms=[];
+  for (let i=1;i<n;i++) {
+    trs.push( Math.max(highs[i]-lows[i], Math.abs(highs[i]-closes[i-1]), Math.abs(lows[i]-closes[i-1])) );
+    const upMove = highs[i]-highs[i-1], downMove = lows[i-1]-lows[i];
+    pdms.push(upMove>downMove&&upMove>0?upMove:0);
+    ndms.push(downMove>upMove&&downMove>0?downMove:0);
+  }
+  function wilderSmooth(arr, p) {
+    const o = new Array(arr.length).fill(NaN);
+    if (arr.length<p) return o;
+    o[p-1] = arr.slice(0,p).reduce((a,b)=>a+b,0);
+    for(let i=p;i<arr.length;i++) o[i]=o[i-1]-o[i-1]/p+arr[i];
+    return o;
+  }
+  const atrS=wilderSmooth(trs,period), pdmS=wilderSmooth(pdms,period), ndmS=wilderSmooth(ndms,period);
+  const dxArr=[];
+  for(let i=0;i<atrS.length;i++){
+    if(isNaN(atrS[i])||atrS[i]===0){dxArr.push(NaN);continue;}
+    const pdi=100*pdmS[i]/atrS[i], ndi=100*ndmS[i]/atrS[i];
+    dxArr.push(100*Math.abs(pdi-ndi)/(pdi+ndi||1));
+  }
+  const validDx = dxArr.filter(v=>!isNaN(v));
+  if(validDx.length<period) return out;
+  let adxVal=validDx.slice(0,period).reduce((a,b)=>a+b,0)/period;
+  let pos = dxArr.findIndex(v=>!isNaN(v)) + period;
+  if(pos+1<n) out[pos+1]=adxVal;
+  for(let i=period;i<dxArr.length;i++){
+    if(isNaN(dxArr[i])) continue;
+    adxVal=(adxVal*(period-1)+dxArr[i])/period;
+    if(i+2<n) out[i+2]=adxVal;
+  }
+  return out;
+}
+
+// ── Core simulation ───────────────────────────────────────────────────────────
+
+function runSimulation(bars, p) {
+  const closes=bars.map(b=>b.c), highs=bars.map(b=>b.h), lows=bars.map(b=>b.l);
+  const hist = macdHistogram(closes, p.macd_fast, p.macd_slow, p.macd_signal);
+  const adx  = adxArr(highs, lows, closes, p.adx_period);
+
+  const warmup = p.macd_slow + p.macd_signal + p.adx_period + 5;
+  const trades = [];
+  let pos = null;
+  let dbgNaN=0, dbgADX=0, dbgHist=0, dbgSession=0, dbgCross=0;
+
+  function inSession(ts) {
+    if (p.session_start === 0 && p.session_end >= 24) return true;
+    const h = new Date(ts*1000).getUTCHours();
+    if (p.session_start < p.session_end) return h >= p.session_start && h < p.session_end;
+    return h >= p.session_start || h < p.session_end;
+  }
+  function isSessionOpen(ts, prevTs) {
+    if (p.session_start === 0 && p.session_end >= 24) return false;
+    return p.morning_stop && !inSession(prevTs) && inSession(ts);
+  }
+  function closeTrade(exitPrice, exitTs, reason, barIdx) {
+    if (!pos) return;
+    const pnl = pos.dir==='LONG'
+      ? (exitPrice-pos.price)/pos.price*100*p.leverage
+      : (pos.price-exitPrice)/pos.price*100*p.leverage;
+    trades.push({
+      dir: pos.dir, entryPrice: pos.price, exitPrice,
+      entryTs: pos.entryTs, exitTs,
+      pnl: +pnl.toFixed(4), reason, bars: barIdx-pos.entryIdx
+    });
+    pos = null;
+  }
+
+  for (let i=warmup; i<bars.length; i++) {
+    const bar=bars[i], prev=bars[i-1];
+    const h=hist[i], hp=hist[i-1], adxV=adx[i];
+    if (isNaN(h)||isNaN(hp)||isNaN(adxV)) { dbgNaN++; continue; }
+
+    // Stop loss
+    if (pos && p.sl_pips>0) {
+      if (pos.dir==='LONG' && bar.l <= pos.price-p.sl_pips) { closeTrade(pos.price-p.sl_pips, bar.t, 'sl', i); continue; }
+      if (pos.dir==='SHORT'&& bar.h >= pos.price+p.sl_pips) { closeTrade(pos.price+p.sl_pips, bar.t, 'sl', i); continue; }
+    }
+
+    // Morning stop reverse
+    if (isSessionOpen(bar.t, prev.t)) {
+      if (pos) {
+        const newDir = pos.dir==='LONG'?'SHORT':'LONG';
+        closeTrade(bar.c, bar.t, 'morning_reverse', i);
+        pos = {dir:newDir, price:bar.c, entryTs:bar.t, entryIdx:i};
+      }
+      continue;
+    }
+
+    // Session end
+    if (!inSession(bar.t)) { dbgSession++; if(pos) closeTrade(bar.c,bar.t,'session_end',i); continue; }
+
+    // ADX filter
+    if (adxV < p.adx_level) { dbgADX++; continue; }
+    // Histogram filter
+    if (Math.abs(h) < p.min_hist_pips) { dbgHist++; continue; }
+
+    const crossUp   = hp<=0 && h>0;
+    const crossDown = hp>=0 && h<0;
+    if (crossUp||crossDown) dbgCross++;
+
+    if (crossUp && (!pos||pos.dir!=='LONG')) {
+      if (pos) closeTrade(bar.c, bar.t, 'flip', i);
+      pos = {dir:'LONG', price:bar.c, entryTs:bar.t, entryIdx:i};
+    } else if (crossDown && (!pos||pos.dir!=='SHORT')) {
+      if (pos) closeTrade(bar.c, bar.t, 'flip', i);
+      pos = {dir:'SHORT', price:bar.c, entryTs:bar.t, entryIdx:i};
+    }
+  }
+
+  const validHist = hist.filter(v=>!isNaN(v));
+  const validAdx  = adx.filter(v=>!isNaN(v));
+  const histMax = Math.max(...validHist.map(Math.abs)).toFixed(4);
+  const histP95 = [...validHist.map(Math.abs)].sort((a,b)=>a-b)[Math.floor(validHist.length*0.95)].toFixed(4);
+  const adxMax  = Math.max(...validAdx).toFixed(2);
+  const adxMed  = [...validAdx].sort((a,b)=>a-b)[Math.floor(validAdx.length*0.5)].toFixed(2);
+  console.log(`[SIM] bars=${bars.length} warmup=${warmup} NaN_skipped=${dbgNaN} session_blocked=${dbgSession} adx_blocked=${dbgADX} hist_blocked=${dbgHist} crosses_seen=${dbgCross} trades=${trades.length}`);
+  console.log(`[INDICATORS] hist_abs_max=${histMax} hist_p95=${histP95} | adx_max=${adxMax} adx_median=${adxMed}`);
+  return trades;
+}
+
+function computeStats(trades) {
+  if (!trades.length) return null;
+  const pnls = trades.map(t=>t.pnl);
+  const wins  = pnls.filter(p=>p>0), losses = pnls.filter(p=>p<=0);
+  const totalPnl = pnls.reduce((a,b)=>a+b,0);
+  const winRate  = wins.length/pnls.length*100;
+  const avgWin   = wins.length   ? wins.reduce((a,b)=>a+b,0)/wins.length     : 0;
+  const avgLoss  = losses.length ? losses.reduce((a,b)=>a+b,0)/losses.length : 0;
+  const gp = wins.reduce((a,b)=>a+b,0), gl = Math.abs(losses.reduce((a,b)=>a+b,0));
+  const pf = gl>0 ? gp/gl : 999;
+
+  let cum=0,peak=0,maxDD=0;
+  const cumPnl = pnls.map(p=>{ cum+=p; peak=Math.max(peak,cum); maxDD=Math.max(maxDD,peak-cum); return +cum.toFixed(3); });
+
+  const mean=totalPnl/pnls.length, std=Math.sqrt(pnls.map(p=>(p-mean)**2).reduce((a,b)=>a+b,0)/(pnls.length-1)||1);
+  const sharpe = std>0 ? (mean/std)*Math.sqrt(pnls.length) : 0;
+
+  const monthly={};
+  trades.forEach(t=>{
+    const d=new Date(t.exitTs*1000), key=`${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}`;
+    monthly[key]=(monthly[key]||0)+t.pnl;
+  });
+  const flatMonths = Object.values(monthly).filter(v=>Math.abs(v)<2).length;
+
+  return { totalPnl:+totalPnl.toFixed(2), winRate:+winRate.toFixed(1), trades:trades.length,
+           pf:+pf.toFixed(3), maxDD:+maxDD.toFixed(2), sharpe:+sharpe.toFixed(3),
+           flatMonths, cumPnl, monthly, avgWin:+avgWin.toFixed(4), avgLoss:+avgLoss.toFixed(4) };
+}
+
+// ── Bybit data fetch ──────────────────────────────────────────────────────────
+
+async function fetchBars(days) {
+  const limit=200, allBars=[];
+  let endTs = Date.now();
+  const target = days*24;
+  setStatus('Fetching Bybit data...', 'running');
+  while (allBars.length < target) {
+    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=SOLUSDT&interval=60&limit=${limit}&end=${endTs}`;
+    try {
+      const r = await fetch(url);
+      const d = await r.json();
+      const list = d?.result?.list;
+      if (!list||!list.length) break;
+      const batch = list.map(c=>({t:Math.floor(+c[0]/1000),o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5]}));
+      batch.sort((a,b)=>a.t-b.t);
+      allBars.unshift(...batch);
+      endTs = +list[list.length-1][0]-1;
+      setStatus(`Fetched ${allBars.length} bars...`, 'running');
+      if (list.length < limit) break;
+      await new Promise(r=>setTimeout(r,300));
+    } catch(e) { setStatus('Fetch error: '+e.message, 'error'); break; }
+  }
+  allBars.sort((a,b)=>a.t-b.t);
+  return allBars;
+}
+
+// ── Update UI ─────────────────────────────────────────────────────────────────
+
+function fmtDate(ts) {
+  const d=new Date(ts*1000);
+  return `${d.getUTCMonth()+1}/${d.getUTCDate()} ${String(d.getUTCHours()).padStart(2,'0')}:00`;
+}
+
+function updateMetrics(s) {
+  const set=(id,val,cls)=>{ const el=document.getElementById(id); el.textContent=val; el.className='metric-value '+(cls||''); };
+  set('m_pnl',   s.totalPnl+'%', s.totalPnl>=0?'pos':'neg');
+  set('m_wr',    s.winRate+'%',  s.winRate>=50?'pos':'neg');
+  set('m_trades',s.trades,       'neu');
+  set('m_pf',    s.pf,           s.pf>=1.5?'pos':s.pf>=1?'neu':'neg');
+  set('m_dd',    '-'+s.maxDD+'%','neg');
+  set('m_sharpe',s.sharpe,       s.sharpe>=1?'pos':s.sharpe>=0?'neu':'neg');
+  set('m_flat',  s.flatMonths+' mo', 'warn');
+}
+
+function updateCharts(s) {
+  if (pnlChartInst) pnlChartInst.destroy();
+  if (monthChartInst) monthChartInst.destroy();
+
+  const isDark = true;
+  const grid = 'rgba(255,255,255,0.05)', tick = '#7a7f96';
+
+  pnlChartInst = new Chart(document.getElementById('pnlChart'), {
+    type:'line',
+    data:{ labels: s.cumPnl.map((_,i)=>i), datasets:[{
+      data: s.cumPnl, borderColor:'#4da6ff', borderWidth:1.5,
+      pointRadius:0, tension:.3, fill:true,
+      backgroundColor:'rgba(77,166,255,0.06)'
+    }]},
+    options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{display:false},
+        y:{grid:{color:grid},ticks:{color:tick,font:{size:10},callback:v=>v+'%'}}
+      }
+    }
+  });
+
+  const months = Object.entries(s.monthly).sort((a,b)=>a[0]<b[0]?-1:1);
+  monthChartInst = new Chart(document.getElementById('monthChart'), {
+    type:'bar',
+    data:{ labels: months.map(m=>m[0].slice(5)), datasets:[{
+      data: months.map(m=>+m[1].toFixed(2)),
+      backgroundColor: months.map(m=>m[1]>=0?'rgba(38,217,127,.6)':'rgba(240,92,92,.6)'),
+      borderRadius:3
+    }]},
+    options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{grid:{display:false},ticks:{color:tick,font:{size:9},maxRotation:45}},
+        y:{grid:{color:grid},ticks:{color:tick,font:{size:10},callback:v=>v+'%'}}
+      }
+    }
+  });
+}
+
+function updateTable(trades) {
+  const tbody = document.getElementById('tradeBody');
+  tbody.innerHTML = '';
+  const recent = trades.slice(-30).reverse();
+  recent.forEach((t,i)=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${trades.length-i}</td>
+      <td>${fmtDate(t.entryTs)}</td>
+      <td>${fmtDate(t.exitTs)}</td>
+      <td class="${t.dir==='LONG'?'long':'short'}">${t.dir}</td>
+      <td>$${t.entryPrice.toFixed(3)}</td>
+      <td>$${t.exitPrice.toFixed(3)}</td>
+      <td class="${t.pnl>=0?'long':'short'}">${t.pnl>=0?'+':''}${t.pnl}%</td>
+      <td>${t.bars}</td>
+      <td style="color:#7a7f96">${t.reason}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+// ── Run backtest ──────────────────────────────────────────────────────────────
+
+async function runBacktest() {
+  const p = getParams();
+  if (p.macd_fast >= p.macd_slow) { setStatus('Error: fast must be < slow', 'error'); return; }
+  document.getElementById('runBtn').disabled = true;
+  document.getElementById('optBtn').disabled = true;
+
+  const bars = await fetchBars(p.days);
+  if (!bars.length) { setStatus('No data fetched — check console for errors', 'error'); document.getElementById('runBtn').disabled=false; return; }
+
+  setStatus(`Fetched ${bars.length} bars (${new Date(bars[0].t*1000).toLocaleDateString()} – ${new Date(bars[bars.length-1].t*1000).toLocaleDateString()}). Running simulation...`, 'running');
+
+  // Auto-suggest histogram scale based on price level
+  const avgPrice = bars.slice(-100).reduce((s,b)=>s+b.c,0)/100;
+  const suggestedHist = +(avgPrice * 0.0003).toFixed(3); // ~0.03% of price
+  console.log(`[AUTO] avg_price=${avgPrice.toFixed(2)} suggested_min_hist=${suggestedHist}`);
+  await new Promise(r=>setTimeout(r,10));
+
+  const trades = runSimulation(bars, p);
+  if (!trades.length) {
+    const avgPrice = bars.slice(-100).reduce((s,b)=>s+b.c,0)/100;
+    const suggestedHist = +(avgPrice * 0.0003).toFixed(3);
+    setStatus(`No trades. Try: min histogram = ${suggestedHist}, ADX level = 20, SL = 0`, 'error');
+    document.getElementById('runBtn').disabled=false;
+    document.getElementById('optBtn').disabled=false;
+    return;
+  }
+
+  const stats = computeStats(trades);
+  lastResult = { params: p, stats, trades };
+
+  updateMetrics(stats);
+  updateCharts(stats);
+  updateTable(trades);
+  setStatus(`Done. ${trades.length} trades over ${bars.length} bars.`, 'done');
+
+  document.getElementById('runBtn').disabled = false;
+  document.getElementById('optBtn').disabled = false;
+}
+
+// ── Optimizer ─────────────────────────────────────────────────────────────────
+
+async function runOptimizer() {
+  const p = getParams();
+  document.getElementById('runBtn').disabled = true;
+  document.getElementById('optBtn').disabled = true;
+
+  const bars = await fetchBars(p.days);
+  if (!bars.length) { setStatus('No data', 'error'); return; }
+
+  const grid = {
+    macd_fast:     [8,10,12],
+    macd_slow:     [21,26,28],
+    macd_signal:   [3,5,9],
+    min_hist_pips: [0.02, 0.05, 0.10],  // SOL-scaled: ~0.02–0.10 of price
+    adx_level:     [20, 25, 30],
+  };
+
+  const keys=Object.keys(grid), vals=Object.values(grid);
+  const combos=[];
+  function cartesian(idx, cur) {
+    if (idx===keys.length) { combos.push({...cur}); return; }
+    for (const v of vals[idx]) { cur[keys[idx]]=v; cartesian(idx+1,cur); }
+  }
+  cartesian(0,{});
+
+  const valid = combos.filter(c=>c.macd_fast<c.macd_slow);
+  setStatus(`Testing ${valid.length} combinations...`, 'running');
+
+  const results = [];
+  for (let i=0; i<valid.length; i++) {
+    const c = valid[i];
+    const params = {...p, ...c};
+    const trades = runSimulation(bars, params);
+    if (trades.length < 20) continue;
+    const s = computeStats(trades);
+    results.push({params:c, stats:s});
+    if ((i+1)%30===0) {
+      setStatus(`Testing ${i+1}/${valid.length}...`, 'running');
+      await new Promise(r=>setTimeout(r,0));
+    }
+  }
+
+  results.sort((a,b)=>b.stats.sharpe-a.stats.sharpe);
+  const top = results.slice(0,10);
+
+  const section = document.getElementById('optSection');
+  const rows    = document.getElementById('optRows');
+  section.style.display = 'block';
+  rows.innerHTML = '';
+
+  top.forEach((r,i)=>{
+    const c=r.params, s=r.stats;
+    const div=document.createElement('div');
+    div.className = 'opt-row' + (i===0?' best':'');
+    div.innerHTML = `
+      <span style="color:#7a7f96;min-width:20px">${i+1}</span>
+      <span>MACD(<b>${c.macd_fast}</b>,<b>${c.macd_slow}</b>,<b>${c.macd_signal}</b>) hist≥${c.min_hist_pips} ADX≥${c.adx_level}</span>
+      <span style="display:flex;gap:10px;align-items:center">
+        <span class="tag ${s.totalPnl>=0?'green':'amber'}">${s.totalPnl>=0?'+':''}${s.totalPnl}%</span>
+        <span style="color:#7a7f96">WR ${s.winRate}%</span>
+        <span style="color:#4da6ff">S ${s.sharpe}</span>
+        <span style="color:#f05c5c">DD ${s.maxDD}%</span>
+        <span style="color:#7a7f96">${s.trades}T</span>
+      </span>
+    `;
+    div.onclick = () => applyParams(c, s);
+    rows.appendChild(div);
+  });
+
+  setStatus(`Optimization done. Best Sharpe: ${top[0].stats.sharpe}`, 'done');
+  document.getElementById('runBtn').disabled = false;
+  document.getElementById('optBtn').disabled = false;
+}
+
+function applyParams(c, s) {
+  if (c.macd_fast)     document.getElementById('macd_fast').value    = c.macd_fast;
+  if (c.macd_slow)     document.getElementById('macd_slow').value    = c.macd_slow;
+  if (c.macd_signal)   document.getElementById('macd_signal').value  = c.macd_signal;
+  if (c.min_hist_pips) document.getElementById('min_hist').value     = c.min_hist_pips;
+  if (c.adx_level)     document.getElementById('adx_level').value    = c.adx_level;
+  setStatus('Params loaded from optimizer — hit Run Backtest to confirm', 'done');
+}
+
+// ── Save / load profiles ──────────────────────────────────────────────────────
+
+function saveProfile() {
+  if (!lastResult) { setStatus('Run a backtest first', 'error'); return; }
+  const p = lastResult.params, s = lastResult.stats;
+  const name = `MACD(${p.macd_fast},${p.macd_slow},${p.macd_signal}) ADX≥${p.adx_level}`;
+  profiles.push({ name, params:p, stats:s });
+  renderProfiles();
+  setStatus('Profile saved', 'done');
+}
+
+function renderProfiles() {
+  const list = document.getElementById('profileList');
+  list.innerHTML = '';
+  profiles.forEach((pr,i)=>{
+    const div = document.createElement('div');
+    div.className = 'profile-item';
+    div.innerHTML = `
+      <span style="color:#7a7f96;font-size:10px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${pr.name}</span>
+      <span class="pnl ${pr.stats.totalPnl>=0?'pos':'neg'}">${pr.stats.totalPnl>=0?'+':''}${pr.stats.totalPnl}%</span>
+    `;
+    div.onclick = () => applyParams(pr.params, pr.stats);
+    list.appendChild(div);
+  });
+}
+</script>
+</body>
+</html>
