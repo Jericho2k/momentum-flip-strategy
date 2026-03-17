@@ -68,7 +68,12 @@ PARAMS = StrategyParams(
 def get_client():
     if not PYBIT_AVAILABLE or not API_KEY:
         return None
-    return HTTP(testnet=TESTNET, api_key=API_KEY, api_secret=API_SECRET)
+    return HTTP(
+        testnet=False,
+        demo=True,
+        api_key=API_KEY,
+        api_secret=API_SECRET,
+    )
 
 
 def set_leverage(client):
