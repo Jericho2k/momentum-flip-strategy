@@ -1,0 +1,10 @@
+.env
+*.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+trade_log.jsonl
+.DS_Store
+Thumbs.db
