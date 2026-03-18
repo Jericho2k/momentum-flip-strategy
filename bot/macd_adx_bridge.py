@@ -35,7 +35,7 @@ TRADE_LOG     = Path("trade_log_macd.jsonl")
 
 API_KEY    = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
-BASE_URL   = "https://api-demo.bybit.com"  # demo trading
+BASE_URL   = "https://api-testnet.bybit.com"  # demo trading
 
 PARAMS = StrategyParams(
     macd_fast     = 8,
@@ -53,10 +53,15 @@ PARAMS = StrategyParams(
 
 # ── Raw Bybit HTTP client ──────────────────────────────────────────────────────
 
-def _sign(params_str: str) -> tuple[str, str]:
+def _sign(payload: str) -> tuple[str, str]:
     ts  = str(int(time.time() * 1000))
-    raw = ts + API_KEY + "5000" + params_str
-    sig = hmac.new(API_SECRET.encode("utf-8"), raw.encode("utf-8"), hashlib.sha256).hexdigest()
+    recv_window = "5000"
+    param_str = ts + API_KEY + recv_window + payload
+    sig = hmac.new(
+        bytes(API_SECRET, "utf-8"),
+        bytes(param_str, "utf-8"),
+        hashlib.sha256
+    ).hexdigest()
     return ts, sig
 
 def _headers(ts: str, sig: str) -> dict:
@@ -69,7 +74,7 @@ def _headers(ts: str, sig: str) -> dict:
     }
 
 def bybit_get(endpoint: str, params: dict) -> dict:
-    query = "&".join(f"{k}={v}" for k, v in params.items())
+    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
     ts, sig = _sign(query)
     try:
         r = httpx.get(
@@ -78,13 +83,16 @@ def bybit_get(endpoint: str, params: dict) -> dict:
             headers=_headers(ts, sig),
             timeout=10
         )
-        return r.json()
+        data = r.json()
+        if data.get("retCode") != 0:
+            log.error(f"{endpoint}: {data.get('retMsg')}")
+        return data
     except Exception as e:
         log.error(f"GET {endpoint} failed: {e}")
         return {}
 
 def bybit_post(endpoint: str, body: dict) -> dict:
-    body_str = json.dumps(body)
+    body_str = json.dumps(body, separators=(',', ':'))
     ts, sig  = _sign(body_str)
     try:
         r = httpx.post(
@@ -93,7 +101,10 @@ def bybit_post(endpoint: str, body: dict) -> dict:
             headers=_headers(ts, sig),
             timeout=10
         )
-        return r.json()
+        data = r.json()
+        if data.get("retCode") != 0:
+            log.warning(f"{endpoint}: {data.get('retMsg')}")
+        return data
     except Exception as e:
         log.error(f"POST {endpoint} failed: {e}")
         return {}
