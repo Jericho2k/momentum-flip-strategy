@@ -173,7 +173,7 @@
         <label>Source</label>
         <select id="data_source" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:var(--font);font-size:12px;">
           <option value="bybit">Bybit (H1, ~1yr)</option>
-          <option value="coingecko">CoinGecko (daily, 2020+)</option>
+          <option value="coingecko">Binance (daily, 2021+)</option>
         </select>
       </div>
       <div class="param-row"><label>History (days)</label><input type="number" id="days" value="365" min="30" max="2000"></div>
@@ -486,26 +486,33 @@ async function fetchBybit(days) {
 }
 
 async function fetchCoinGecko(days) {
-  setStatus('Fetching CoinGecko OHLC data...', 'running');
-  const url = `https://api.coingecko.com/api/v3/coins/solana/ohlc?vs_currency=usd&days=max`;
-  try {
-    const r    = await fetch(url, {headers: {accept: 'application/json'}});
-    const raw  = await r.json();
-    if (!Array.isArray(raw)) {
-      setStatus('CoinGecko error: ' + JSON.stringify(raw), 'error');
-      return [];
+  setStatus('Fetching Binance daily data (2021–present)...', 'running');
+  const startMs = new Date('2021-01-01').getTime();
+  const allBars = [];
+  let startTime = startMs;
+
+  while (true) {
+    const url = `https://api.binance.com/api/v3/klines?symbol=SOLUSDT&interval=1d&startTime=${startTime}&limit=1000`;
+    try {
+      const r   = await fetch(url);
+      const raw = await r.json();
+      if (!raw || !raw.length) break;
+      raw.forEach(c => allBars.push({
+        t: Math.floor(+c[0]/1000),
+        o: +c[1], h: +c[2], l: +c[3], c: +c[4], v: +c[5]
+      }));
+      setStatus(`Fetched ${allBars.length} Binance bars...`, 'running');
+      if (raw.length < 1000) break;
+      startTime = +raw[raw.length-1][0] + 1;
+      await new Promise(r => setTimeout(r, 200));
+    } catch(e) {
+      setStatus('Binance fetch error: ' + e.message, 'error');
+      break;
     }
-    const bars = raw.map(c => ({
-      t: Math.floor(c[0]/1000),
-      o: c[1], h: c[2], l: c[3], c: c[4], v: 0
-    }));
-    bars.sort((a,b) => a.t-b.t);
-    setStatus(`CoinGecko: ${bars.length} bars (${new Date(bars[0].t*1000).getFullYear()}–present)`, 'running');
-    return bars;
-  } catch(e) {
-    setStatus('CoinGecko error: ' + e.message, 'error');
-    return [];
   }
+
+  allBars.sort((a,b) => a.t - b.t);
+  return allBars;
 }
 
 // ── Update UI ─────────────────────────────────────────────────────────────────
