@@ -143,7 +143,7 @@
       <div class="param-row"><label>Fast (Б)</label><input type="number" id="macd_fast" value="10" min="2" max="50"></div>
       <div class="param-row"><label>Slow (М)</label><input type="number" id="macd_slow" value="28" min="5" max="100"></div>
       <div class="param-row"><label>Signal (С)</label><input type="number" id="macd_signal" value="3" min="1" max="20"></div>
-      <div class="param-row"><label>Min histogram (П-ы)</label><input type="number" id="min_hist" value="3.3" min="0" step="0.1"></div>
+      <div class="param-row"><label>Min histogram % of price</label><input type="number" id="min_hist" value="0.0008" min="0" step="0.0001"></div>
     </div>
   </div>
 
@@ -187,6 +187,14 @@
   <div>
     <div class="section-title">Data source</div>
     <div class="param-group">
+      <div class="param-row">
+        <label>Symbol</label>
+        <select id="symbol" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:var(--font);font-size:12px;width:130px">
+          <option value="SOLUSDT">SOL/USDT</option>
+          <option value="AVAXUSDT">AVAX/USDT</option>
+          <option value="SUIUSDT">SUI/USDT</option>
+        </select>
+      </div>
       <div class="param-row">
         <label>Source</label>
         <select id="data_source" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:var(--font);font-size:12px;width:72px">
@@ -283,7 +291,7 @@ function getParams() {
     macd_fast:     +document.getElementById('macd_fast').value,
     macd_slow:     +document.getElementById('macd_slow').value,
     macd_signal:   +document.getElementById('macd_signal').value,
-    min_hist_pips: +document.getElementById('min_hist').value,
+    min_hist_pct:  +document.getElementById('min_hist').value,
     adx_period:    +document.getElementById('adx_period').value,
     adx_level:     +document.getElementById('adx_level').value,
     session_start:     +document.getElementById('sess_start').value,
@@ -294,6 +302,7 @@ function getParams() {
     regime_enabled:    document.getElementById('regime_enabled').checked,
     regime_adx_period: +document.getElementById('regime_adx_period').value,
     regime_adx_level:  +document.getElementById('regime_adx_level').value,
+    symbol:            document.getElementById('symbol').value,
     data_source:       document.getElementById('data_source').value,
     start_date:        document.getElementById('start_date').value,
     end_date:          document.getElementById('end_date').value,
@@ -448,8 +457,9 @@ function runSimulation(bars, p) {
 
     // ADX filter
     if (adxV < p.adx_level) { dbgADX++; continue; }
-    // Histogram filter
-    if (Math.abs(h) < p.min_hist_pips) { dbgHist++; continue; }
+    // Histogram filter — relative to price so it scales across symbols
+    const minHistAbs = bar.c * (p.min_hist_pct || 0.0008);
+    if (Math.abs(h) < minHistAbs) { dbgHist++; continue; }
 
     // Regime filter — daily ADX
     if (p.regime_enabled) {
@@ -558,7 +568,8 @@ async function fetchBinance(startMs, endMs) {
   const allBars = [];
   let startTime = startMs;
   while (true) {
-    const url = `https://api.binance.com/api/v3/klines?symbol=SOLUSDT&interval=15m&startTime=${startTime}&endTime=${endMs}&limit=1000`;
+    const symbol = document.getElementById('symbol').value;
+    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=15m&startTime=${startTime}&endTime=${endMs}&limit=1000`;
     try {
       const r   = await fetch(url);
       const raw = await r.json();
@@ -596,6 +607,9 @@ function updateMetrics(s) {
 
 function updatePriceChart(bars) {
   if (priceChartInst) priceChartInst.destroy();
+
+  document.querySelector('#priceChart').closest('.chart-card').querySelector('.chart-title').textContent =
+    `${document.getElementById('symbol').value} price — selected period`;
 
   // Subsample to max 500 points so chart stays fast
   const step   = Math.max(1, Math.floor(bars.length / 500));
@@ -748,9 +762,8 @@ async function runBacktest() {
 
   const trades = runSimulation(bars, p);
   if (!trades.length) {
-    const avgPrice = bars.slice(-100).reduce((s,b) => s+b.c, 0) / 100;
-    const suggestedHist = +(avgPrice * 0.0003).toFixed(3);
-    setStatus(`No trades. Try: min histogram = ${suggestedHist}, ADX level = 20, SL = 0`, 'error');
+    const suggestedPct = (0.0008).toFixed(4);
+    setStatus(`No trades. Try: min histogram % = ${suggestedPct}, ADX level = 20`, 'error');
     document.getElementById('runBtn').disabled = false;
     document.getElementById('optBtn').disabled = false;
     return;
@@ -779,11 +792,11 @@ async function runOptimizer() {
   if (!bars.length) { setStatus('No data', 'error'); return; }
 
   const grid = {
-    macd_fast:     [8,10,12],
-    macd_slow:     [21,26,28],
-    macd_signal:   [3,5,9],
-    min_hist_pips: [0.02, 0.05, 0.10],  // SOL-scaled: ~0.02–0.10 of price
-    adx_level:     [20, 25, 30],
+    macd_fast:    [8, 10, 12],
+    macd_slow:    [21, 26, 28],
+    macd_signal:  [3, 5, 9],
+    min_hist_pct: [0.0003, 0.0008, 0.0015],  // 0.03%, 0.08%, 0.15% of price
+    adx_level:    [20, 25, 30],
   };
 
   const keys=Object.keys(grid), vals=Object.values(grid);
@@ -827,7 +840,7 @@ async function runOptimizer() {
       macd_fast:         c.macd_fast,
       macd_slow:         c.macd_slow,
       macd_signal:       c.macd_signal,
-      min_hist_pips:     c.min_hist_pips,
+      min_hist_pct:      c.min_hist_pct,
       adx_period:        c.adx_period     || 14,
       adx_level:         c.adx_level,
       session_start:     p.session_start,
@@ -847,7 +860,7 @@ async function runOptimizer() {
     div.className = 'opt-row' + (i === 0 ? ' best' : '');
     div.innerHTML = `
       <span style="color:#7a7f96;min-width:20px">${i+1}</span>
-      <span>MACD(<b>${c.macd_fast}</b>,<b>${c.macd_slow}</b>,<b>${c.macd_signal}</b>) hist≥${c.min_hist_pips} ADX≥${c.adx_level}</span>
+      <span>MACD(<b>${c.macd_fast}</b>,<b>${c.macd_slow}</b>,<b>${c.macd_signal}</b>) hist≥${(c.min_hist_pct*100).toFixed(3)}% ADX≥${c.adx_level}</span>
       <span style="display:flex;gap:10px;align-items:center">
         <span class="tag ${s.totalPnl>=0?'green':'amber'}">${s.totalPnl>=0?'+':''}${s.totalPnl}%</span>
         <span style="color:#7a7f96">WR ${s.winRate}%</span>

@@ -38,20 +38,20 @@ API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 BASE_URL   = "https://api-demo.bybit.com"  # demo trading
 
 PARAMS = StrategyParams(
-    macd_fast          = 8,
-    macd_slow          = 21,
-    macd_signal        = 9,
-    min_hist_pips      = 0.1,
-    adx_period         = 14,
-    adx_level          = 25.0,
-    session_start      = None,
-    session_end        = None,
-    morning_stop       = False,
-    sl_pips            = 0.0,
-    leverage           = 2,
-    regime_adx_period  = 14,
-    regime_adx_level   = 20.0,
-    regime_enabled     = True,
+    macd_fast         = 12,
+    macd_slow         = 28,
+    macd_signal       = 5,
+    min_hist_pct      = 0.0008,   # 0.08% of price
+    adx_period        = 14,
+    adx_level         = 20.0,
+    session_start     = None,
+    session_end       = None,
+    morning_stop      = False,
+    sl_pips           = 0.0,
+    leverage          = 2,
+    regime_adx_period = 14,
+    regime_adx_level  = 20.0,
+    regime_enabled    = True,
 )
 
 DAILY_CANDLES = 60  # daily bars to fetch for regime filter
@@ -271,7 +271,7 @@ def log_decision(data: dict):
 def run():
     log.info("MACD/ADX Bridge starting (raw HTTP mode)")
     log.info(f"Params: MACD({PARAMS.macd_fast},{PARAMS.macd_slow},{PARAMS.macd_signal}) "
-             f"hist>={PARAMS.min_hist_pips} ADX>={PARAMS.adx_level} | {PARAMS.leverage}x")
+             f"hist>={PARAMS.min_hist_pct*100:.3f}% ADX>={PARAMS.adx_level} | {PARAMS.leverage}x")
     log.info(f"Endpoint: {BASE_URL}")
 
     if not API_KEY or not API_SECRET:
