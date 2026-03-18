@@ -171,12 +171,19 @@
     <div class="param-group">
       <div class="param-row">
         <label>Source</label>
-        <select id="data_source" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:var(--font);font-size:12px;">
-          <option value="bybit">Bybit (H1, ~1yr)</option>
-          <option value="coingecko">Binance (daily, 2021+)</option>
+        <select id="data_source" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:var(--font);font-size:12px;width:72px">
+          <option value="bybit">Bybit (H1)</option>
+          <option value="binance">Binance (15m, 2021+)</option>
         </select>
       </div>
-      <div class="param-row"><label>History (days)</label><input type="number" id="days" value="365" min="30" max="2000"></div>
+      <div class="param-row">
+        <label>Start date</label>
+        <input type="date" id="start_date" value="2024-01-01" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:var(--font);font-size:11px;width:130px">
+      </div>
+      <div class="param-row">
+        <label>End date</label>
+        <input type="date" id="end_date" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:var(--font);font-size:11px;width:130px">
+      </div>
     </div>
   </div>
 
@@ -242,10 +249,10 @@
 </div>
 
 <script>
-// ── In-memory profiles ────────────────────────────────────────────────────────
-let profiles = [];
 let lastResult = null;
 let pnlChartInst = null, monthChartInst = null;
+
+document.getElementById('end_date').value = new Date().toISOString().split('T')[0];
 
 function getParams() {
   return {
@@ -260,7 +267,9 @@ function getParams() {
     morning_stop:  document.getElementById('morning_stop').checked,
     sl_pips:       +document.getElementById('sl_pips').value,
     leverage:      +document.getElementById('leverage').value,
-    days:          +document.getElementById('days').value,
+    data_source:   document.getElementById('data_source').value,
+    start_date:    document.getElementById('start_date').value,
+    end_date:      document.getElementById('end_date').value,
   };
 }
 
@@ -450,68 +459,63 @@ function computeStats(trades) {
 
 // ── Data fetch ────────────────────────────────────────────────────────────────
 
-async function fetchBars(days) {
-  const source = document.getElementById('data_source').value;
+async function fetchBars() {
+  const p = getParams();
+  const startMs = new Date(p.start_date).getTime();
+  const endMs   = new Date(p.end_date).getTime();
 
-  if (source === 'coingecko') {
-    return await fetchCoinGecko(days);
+  if (p.data_source === 'binance') {
+    return await fetchBinance(startMs, endMs);
   } else {
-    return await fetchBybit(days);
+    return await fetchBybit(startMs, endMs);
   }
 }
 
-async function fetchBybit(days) {
-  const limit=200, allBars=[];
-  let endTs = Date.now();
-  const target = days*24;
+async function fetchBybit(startMs, endMs) {
+  const limit = 200, allBars = [];
+  let endTs = endMs;
   setStatus('Fetching Bybit H1 data...', 'running');
-  while (allBars.length < target) {
+  while (true) {
     const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=SOLUSDT&interval=60&limit=${limit}&end=${endTs}`;
     try {
       const r = await fetch(url);
       const d = await r.json();
       const list = d?.result?.list;
-      if (!list||!list.length) break;
-      const batch = list.map(c=>({t:Math.floor(+c[0]/1000),o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5]}));
-      batch.sort((a,b)=>a.t-b.t);
-      allBars.unshift(...batch);
-      endTs = +list[list.length-1][0]-1;
+      if (!list || !list.length) break;
+      const batch = list.map(c => ({t:Math.floor(+c[0]/1000),o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5]}));
+      batch.sort((a,b) => a.t-b.t);
+      const filtered = batch.filter(b => b.t*1000 >= startMs);
+      allBars.unshift(...filtered);
+      endTs = +list[list.length-1][0] - 1;
       setStatus(`Fetched ${allBars.length} Bybit bars...`, 'running');
-      if (list.length < limit) break;
-      await new Promise(r=>setTimeout(r,300));
-    } catch(e) { setStatus('Bybit fetch error: '+e.message, 'error'); break; }
+      if (list.length < limit || +list[list.length-1][0] <= startMs) break;
+      await new Promise(r => setTimeout(r, 300));
+    } catch(e) { setStatus('Bybit error: '+e.message, 'error'); break; }
   }
-  allBars.sort((a,b)=>a.t-b.t);
+  allBars.sort((a,b) => a.t-b.t);
   return allBars;
 }
 
-async function fetchCoinGecko(days) {
-  setStatus('Fetching Binance daily data (2021–present)...', 'running');
-  const startMs = new Date('2021-01-01').getTime();
+async function fetchBinance(startMs, endMs) {
+  setStatus('Fetching Binance 15m data — this may take a minute...', 'running');
   const allBars = [];
   let startTime = startMs;
-
   while (true) {
-    const url = `https://api.binance.com/api/v3/klines?symbol=SOLUSDT&interval=1d&startTime=${startTime}&limit=1000`;
+    const url = `https://api.binance.com/api/v3/klines?symbol=SOLUSDT&interval=15m&startTime=${startTime}&endTime=${endMs}&limit=1000`;
     try {
       const r   = await fetch(url);
       const raw = await r.json();
       if (!raw || !raw.length) break;
       raw.forEach(c => allBars.push({
-        t: Math.floor(+c[0]/1000),
-        o: +c[1], h: +c[2], l: +c[3], c: +c[4], v: +c[5]
+        t:Math.floor(+c[0]/1000), o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
       }));
       setStatus(`Fetched ${allBars.length} Binance bars...`, 'running');
       if (raw.length < 1000) break;
       startTime = +raw[raw.length-1][0] + 1;
-      await new Promise(r => setTimeout(r, 200));
-    } catch(e) {
-      setStatus('Binance fetch error: ' + e.message, 'error');
-      break;
-    }
+      await new Promise(r => setTimeout(r, 150));
+    } catch(e) { setStatus('Binance error: '+e.message, 'error'); break; }
   }
-
-  allBars.sort((a,b) => a.t - b.t);
+  allBars.sort((a,b) => a.t-b.t);
   return allBars;
 }
 
@@ -603,7 +607,7 @@ async function runBacktest() {
   document.getElementById('runBtn').disabled = true;
   document.getElementById('optBtn').disabled = true;
 
-  const bars = await fetchBars(p.days);
+  const bars = await fetchBars();
   if (!bars.length) { setStatus('No data fetched — check console for errors', 'error'); document.getElementById('runBtn').disabled=false; return; }
 
   setStatus(`Fetched ${bars.length} bars (${new Date(bars[0].t*1000).toLocaleDateString()} – ${new Date(bars[bars.length-1].t*1000).toLocaleDateString()}). Running simulation...`, 'running');
@@ -643,7 +647,7 @@ async function runOptimizer() {
   document.getElementById('runBtn').disabled = true;
   document.getElementById('optBtn').disabled = true;
 
-  const bars = await fetchBars(p.days);
+  const bars = await fetchBars();
   if (!bars.length) { setStatus('No data', 'error'); return; }
 
   const grid = {
@@ -720,31 +724,121 @@ function applyParams(c, s) {
   setStatus('Params loaded from optimizer — hit Run Backtest to confirm', 'done');
 }
 
-// ── Save / load profiles ──────────────────────────────────────────────────────
+// ── Profiles — persistent via localStorage ────────────────────────────────────
+const STORAGE_KEY = 'sol_backtester_profiles';
+
+function loadProfiles() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function saveProfilesToStorage(profiles) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles));
+  } catch(e) {
+    console.error('Could not save profiles:', e);
+  }
+}
+
+let profiles = loadProfiles();
 
 function saveProfile() {
   if (!lastResult) { setStatus('Run a backtest first', 'error'); return; }
-  const p = lastResult.params, s = lastResult.stats;
-  const name = `MACD(${p.macd_fast},${p.macd_slow},${p.macd_signal}) ADX≥${p.adx_level}`;
-  profiles.push({ name, params:p, stats:s });
+
+  const p = lastResult.params;
+  const s = lastResult.stats;
+
+  const profile = {
+    id:        Date.now(),
+    saved_at:  new Date().toISOString(),
+    name:      `MACD(${p.macd_fast},${p.macd_slow},${p.macd_signal}) ADX≥${p.adx_level} ${p.data_source} ${p.start_date}→${p.end_date}`,
+    params:    p,
+    stats: {
+      totalPnl:   s.totalPnl,
+      winRate:    s.winRate,
+      trades:     s.trades,
+      pf:         s.pf,
+      maxDD:      s.maxDD,
+      sharpe:     s.sharpe,
+      flatMonths: s.flatMonths,
+      avgWin:     s.avgWin,
+      avgLoss:    s.avgLoss,
+    }
+  };
+
+  profiles.push(profile);
+  saveProfilesToStorage(profiles);
   renderProfiles();
-  setStatus('Profile saved', 'done');
+  setStatus(`Profile saved (${profiles.length} total)`, 'done');
+}
+
+function deleteProfile(id) {
+  profiles = profiles.filter(p => p.id !== id);
+  saveProfilesToStorage(profiles);
+  renderProfiles();
 }
 
 function renderProfiles() {
   const list = document.getElementById('profileList');
   list.innerHTML = '';
-  profiles.forEach((pr,i)=>{
+
+  if (!profiles.length) {
+    list.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:4px 0">No saved profiles yet</div>';
+    return;
+  }
+
+  profiles.slice().reverse().forEach(pr => {
     const div = document.createElement('div');
     div.className = 'profile-item';
+    div.style.cssText = 'flex-direction:column;align-items:flex-start;gap:4px;cursor:pointer';
     div.innerHTML = `
-      <span style="color:#7a7f96;font-size:10px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${pr.name}</span>
-      <span class="pnl ${pr.stats.totalPnl>=0?'pos':'neg'}">${pr.stats.totalPnl>=0?'+':''}${pr.stats.totalPnl}%</span>
+      <div style="display:flex;justify-content:space-between;width:100%;align-items:center">
+        <span style="color:var(--muted);font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${pr.name}</span>
+        <span class="pnl ${pr.stats.totalPnl>=0?'pos':'neg'}" style="font-size:12px">${pr.stats.totalPnl>=0?'+':''}${pr.stats.totalPnl}%</span>
+      </div>
+      <div style="display:flex;gap:8px;font-size:10px;color:var(--muted)">
+        <span>WR ${pr.stats.winRate}%</span>
+        <span>S ${pr.stats.sharpe}</span>
+        <span>DD ${pr.stats.maxDD}%</span>
+        <span>${pr.stats.trades}T</span>
+        <span style="color:var(--muted);font-size:9px">${pr.params.data_source} ${pr.params.start_date}→${pr.params.end_date?.slice(5)}</span>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:2px">
+        <button onclick="loadProfile(${pr.id})" style="font-size:10px;padding:2px 8px;border-radius:4px;border:0.5px solid var(--border);background:transparent;color:var(--blue);cursor:pointer">Load</button>
+        <button onclick="deleteProfile(${pr.id})" style="font-size:10px;padding:2px 8px;border-radius:4px;border:0.5px solid var(--border);background:transparent;color:var(--red);cursor:pointer">Delete</button>
+      </div>
     `;
-    div.onclick = () => applyParams(pr.params, pr.stats);
     list.appendChild(div);
   });
 }
+
+function loadProfile(id) {
+  const pr = profiles.find(p => p.id === id);
+  if (!pr) return;
+  const p = pr.params;
+
+  document.getElementById('macd_fast').value      = p.macd_fast;
+  document.getElementById('macd_slow').value      = p.macd_slow;
+  document.getElementById('macd_signal').value    = p.macd_signal;
+  document.getElementById('min_hist').value       = p.min_hist_pips;
+  document.getElementById('adx_period').value     = p.adx_period;
+  document.getElementById('adx_level').value      = p.adx_level;
+  document.getElementById('sess_start').value     = p.session_start;
+  document.getElementById('sess_end').value       = p.session_end;
+  document.getElementById('morning_stop').checked = p.morning_stop;
+  document.getElementById('sl_pips').value        = p.sl_pips;
+  document.getElementById('leverage').value       = p.leverage;
+  if (p.data_source) document.getElementById('data_source').value = p.data_source;
+  if (p.start_date)  document.getElementById('start_date').value  = p.start_date;
+  if (p.end_date)    document.getElementById('end_date').value    = p.end_date;
+
+  setStatus(`Profile loaded — hit Run Backtest to re-run`, 'done');
+}
+
+// Initialize profiles on load
+renderProfiles();
 </script>
 </body>
 </html>
