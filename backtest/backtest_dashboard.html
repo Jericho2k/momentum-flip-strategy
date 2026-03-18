@@ -486,35 +486,24 @@ async function fetchBybit(days) {
 }
 
 async function fetchCoinGecko(days) {
-  setStatus('Fetching CoinGecko data (2020–present)...', 'running');
-  const url = `https://api.coingecko.com/api/v3/coins/solana/market_chart?vs_currency=usd&days=max&interval=daily`;
+  setStatus('Fetching CoinGecko OHLC data...', 'running');
+  const url = `https://api.coingecko.com/api/v3/coins/solana/ohlc?vs_currency=usd&days=max`;
   try {
-    const r   = await fetch(url);
-    const d   = await r.json();
-    const prices  = d.prices  || [];
-    const volumes = d.total_volumes || [];
-    const volMap  = {};
-    volumes.forEach(v => volMap[Math.floor(v[0]/1000)] = v[1]);
-
-    const bars = [];
-    for (let i=1; i<prices.length; i++) {
-      const ts    = Math.floor(prices[i][0] / 1000);
-      const close = prices[i][1];
-      const prev  = prices[i-1][1];
-      bars.push({
-        t: ts,
-        o: prev,
-        h: Math.max(close, prev) * 1.002,
-        l: Math.min(close, prev) * 0.998,
-        c: close,
-        v: volMap[ts] || 0,
-      });
+    const r    = await fetch(url, {headers: {accept: 'application/json'}});
+    const raw  = await r.json();
+    if (!Array.isArray(raw)) {
+      setStatus('CoinGecko error: ' + JSON.stringify(raw), 'error');
+      return [];
     }
-    bars.sort((a,b)=>a.t-b.t);
-    setStatus(`CoinGecko: ${bars.length} daily bars fetched`, 'running');
+    const bars = raw.map(c => ({
+      t: Math.floor(c[0]/1000),
+      o: c[1], h: c[2], l: c[3], c: c[4], v: 0
+    }));
+    bars.sort((a,b) => a.t-b.t);
+    setStatus(`CoinGecko: ${bars.length} bars (${new Date(bars[0].t*1000).getFullYear()}–present)`, 'running');
     return bars;
   } catch(e) {
-    setStatus('CoinGecko fetch error: '+e.message, 'error');
+    setStatus('CoinGecko error: ' + e.message, 'error');
     return [];
   }
 }

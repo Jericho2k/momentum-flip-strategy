@@ -170,54 +170,54 @@ def fetch_coingecko_full_history(
     vs_currency: str = "usd",
 ) -> list[Bar]:
     """
-    Fetch maximum available history from CoinGecko (daily bars from 2020).
-    Uses the market_chart endpoint which provides more granular data than ohlc.
-    Free tier, no API key needed.
+    Fetch ~2 years of daily OHLC from CoinGecko free tier.
+    Uses the /ohlc endpoint with days=max (free, no key needed).
     """
-    log.info(f"Fetching full {coin_id} history from CoinGecko...")
+    log.info(f"Fetching {coin_id} OHLC from CoinGecko free tier...")
 
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
     params = {
         "vs_currency": vs_currency,
         "days":        "max",
-        "interval":    "daily",
     }
 
     try:
-        r = requests.get(url, params=params, timeout=30)
+        r = requests.get(
+            url,
+            params=params,
+            headers={"accept": "application/json"},
+            timeout=30
+        )
         r.raise_for_status()
-        data = r.json()
+        raw = r.json()
     except Exception as e:
-        log.error(f"CoinGecko full history fetch failed: {e}")
+        log.error(f"CoinGecko fetch failed: {e}")
         return []
 
-    prices  = data.get("prices", [])
-    volumes = data.get("total_volumes", [])
-
-    vol_map = {int(v[0]) // 1000: float(v[1]) for v in volumes}
+    if not raw or not isinstance(raw, list):
+        log.error(f"Unexpected response: {raw}")
+        return []
 
     bars = []
-    for i in range(1, len(prices)):
-        ts    = int(prices[i][0]) // 1000
-        close = float(prices[i][1])
-        prev  = float(prices[i-1][1])
-        # Approximate OHLC from daily close prices
-        high  = max(close, prev) * 1.002
-        low   = min(close, prev) * 0.998
-        bars.append(Bar(
-            timestamp = ts,
-            open      = prev,
-            high      = high,
-            low       = low,
-            close     = close,
-            volume    = vol_map.get(ts, 0.0),
-        ))
+    for c in raw:
+        try:
+            bars.append(Bar(
+                timestamp = int(c[0]) // 1000,
+                open      = float(c[1]),
+                high      = float(c[2]),
+                low       = float(c[3]),
+                close     = float(c[4]),
+                volume    = 0.0,
+            ))
+        except (IndexError, ValueError):
+            continue
 
     bars.sort(key=lambda b: b.timestamp)
-    log.info(f"Full history: {len(bars)} daily bars")
+    log.info(f"Fetched {len(bars)} bars")
     if bars:
         log.info(f"From: {datetime.fromtimestamp(bars[0].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')}")
         log.info(f"To:   {datetime.fromtimestamp(bars[-1].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')}")
+        log.info(f"Price range: ${min(b.low for b in bars):.2f} – ${max(b.high for b in bars):.2f}")
 
     return bars
 
