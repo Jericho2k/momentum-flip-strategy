@@ -769,10 +769,28 @@ async function runOptimizer() {
   section.style.display = 'block';
   rows.innerHTML = '';
 
-  top.forEach((r,i)=>{
-    const c=r.params, s=r.stats;
-    const div=document.createElement('div');
-    div.className = 'opt-row' + (i===0?' best':'');
+  top.forEach((r, i) => {
+    const c = r.params, s = r.stats;
+    const p = getParams(); // get current data source / dates
+    const fullParams = {
+      macd_fast:     c.macd_fast,
+      macd_slow:     c.macd_slow,
+      macd_signal:   c.macd_signal,
+      min_hist_pips: c.min_hist_pips,
+      adx_period:    c.adx_period     || 14,
+      adx_level:     c.adx_level,
+      session_start: p.session_start,
+      session_end:   p.session_end,
+      morning_stop:  p.morning_stop,
+      sl_pips:       p.sl_pips,
+      leverage:      p.leverage,
+      data_source:   p.data_source,
+      start_date:    p.start_date,
+      end_date:      p.end_date,
+    };
+
+    const div = document.createElement('div');
+    div.className = 'opt-row' + (i === 0 ? ' best' : '');
     div.innerHTML = `
       <span style="color:#7a7f96;min-width:20px">${i+1}</span>
       <span>MACD(<b>${c.macd_fast}</b>,<b>${c.macd_slow}</b>,<b>${c.macd_signal}</b>) hist≥${c.min_hist_pips} ADX≥${c.adx_level}</span>
@@ -782,9 +800,13 @@ async function runOptimizer() {
         <span style="color:#4da6ff">S ${s.sharpe}</span>
         <span style="color:#f05c5c">DD ${s.maxDD}%</span>
         <span style="color:#7a7f96">${s.trades}T</span>
+        <button onclick="event.stopPropagation(); saveOptimizerResult(${JSON.stringify(fullParams).replace(/"/g, '&quot;')}, ${JSON.stringify(s).replace(/"/g, '&quot;')})"
+          style="font-size:10px;padding:2px 8px;border-radius:4px;border:0.5px solid var(--amber);background:transparent;color:var(--amber);cursor:pointer;white-space:nowrap">
+          + Save
+        </button>
       </span>
     `;
-    div.onclick = () => applyParams(c, s);
+    div.onclick = () => applyParams(fullParams);
     rows.appendChild(div);
   });
 
@@ -793,13 +815,22 @@ async function runOptimizer() {
   document.getElementById('optBtn').disabled = false;
 }
 
-function applyParams(c, s) {
-  if (c.macd_fast)     document.getElementById('macd_fast').value    = c.macd_fast;
-  if (c.macd_slow)     document.getElementById('macd_slow').value    = c.macd_slow;
-  if (c.macd_signal)   document.getElementById('macd_signal').value  = c.macd_signal;
-  if (c.min_hist_pips) document.getElementById('min_hist').value     = c.min_hist_pips;
-  if (c.adx_level)     document.getElementById('adx_level').value    = c.adx_level;
-  setStatus('Params loaded from optimizer — hit Run Backtest to confirm', 'done');
+function applyParams(p) {
+  if (p.macd_fast)                   document.getElementById('macd_fast').value       = p.macd_fast;
+  if (p.macd_slow)                   document.getElementById('macd_slow').value       = p.macd_slow;
+  if (p.macd_signal)                 document.getElementById('macd_signal').value     = p.macd_signal;
+  if (p.min_hist_pips !== undefined) document.getElementById('min_hist').value        = p.min_hist_pips;
+  if (p.adx_period)                  document.getElementById('adx_period').value      = p.adx_period;
+  if (p.adx_level)                   document.getElementById('adx_level').value       = p.adx_level;
+  if (p.session_start !== undefined) document.getElementById('sess_start').value      = p.session_start;
+  if (p.session_end   !== undefined) document.getElementById('sess_end').value        = p.session_end;
+  if (p.morning_stop  !== undefined) document.getElementById('morning_stop').checked  = p.morning_stop;
+  if (p.sl_pips       !== undefined) document.getElementById('sl_pips').value         = p.sl_pips;
+  if (p.leverage)                    document.getElementById('leverage').value        = p.leverage;
+  if (p.data_source)                 document.getElementById('data_source').value     = p.data_source;
+  if (p.start_date)                  document.getElementById('start_date').value      = p.start_date;
+  if (p.end_date)                    document.getElementById('end_date').value        = p.end_date;
+  setStatus('Params loaded — hit Run Backtest to confirm', 'done');
 }
 
 // ── Profiles — persistent via localStorage ────────────────────────────────────
@@ -850,6 +881,20 @@ function saveProfile() {
   saveProfilesToStorage(profiles);
   renderProfiles();
   setStatus(`Profile saved (${profiles.length} total)`, 'done');
+}
+
+function saveOptimizerResult(params, stats) {
+  const profile = {
+    id:       Date.now(),
+    saved_at: new Date().toISOString(),
+    name:     `MACD(${params.macd_fast},${params.macd_slow},${params.macd_signal}) ADX≥${params.adx_level} ${params.data_source} ${params.start_date}→${params.end_date?.slice(5)}`,
+    params:   params,
+    stats:    stats,
+  };
+  profiles.push(profile);
+  saveProfilesToStorage(profiles);
+  renderProfiles();
+  setStatus(`Saved: MACD(${params.macd_fast},${params.macd_slow},${params.macd_signal}) ADX≥${params.adx_level}`, 'done');
 }
 
 function deleteProfile(id) {
