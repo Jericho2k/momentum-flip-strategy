@@ -213,7 +213,13 @@
     <div class="metric"><div class="metric-label">Flat months</div><div class="metric-value warn" id="m_flat">—</div></div>
   </div>
 
-  <!-- Charts row -->
+  <!-- Price chart -->
+  <div class="chart-card" style="margin-bottom:14px">
+    <div class="chart-title">SOL/USDT price — selected period</div>
+    <div style="position:relative;width:100%;height:160px"><canvas id="priceChart"></canvas></div>
+  </div>
+
+  <!-- PnL + Monthly row -->
   <div class="charts-row">
     <div class="chart-card">
       <div class="chart-title">Cumulative PnL %</div>
@@ -250,7 +256,7 @@
 
 <script>
 let lastResult = null;
-let pnlChartInst = null, monthChartInst = null;
+let pnlChartInst = null, monthChartInst = null, priceChartInst = null;
 
 document.getElementById('end_date').value = new Date().toISOString().split('T')[0];
 
@@ -537,6 +543,74 @@ function updateMetrics(s) {
   set('m_flat',  s.flatMonths+' mo', 'warn');
 }
 
+function updatePriceChart(bars) {
+  if (priceChartInst) priceChartInst.destroy();
+
+  // Subsample to max 500 points so chart stays fast
+  const step   = Math.max(1, Math.floor(bars.length / 500));
+  const sample = bars.filter((_, i) => i % step === 0);
+
+  const labels = sample.map(b => {
+    const d = new Date(b.t * 1000);
+    return `${d.getUTCMonth()+1}/${d.getUTCDate()}`;
+  });
+
+  const prices = sample.map(b => +b.c.toFixed(3));
+
+  // Color line based on direction — green if price ended higher
+  const lineColor = prices[prices.length-1] >= prices[0] ? '#1D9E75' : '#f05c5c';
+
+  priceChartInst = new Chart(document.getElementById('priceChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data:            prices,
+        borderColor:     lineColor,
+        borderWidth:     1.5,
+        pointRadius:     0,
+        tension:         0.2,
+        fill:            true,
+        backgroundColor: lineColor === '#1D9E75'
+          ? 'rgba(29,158,117,0.06)'
+          : 'rgba(240,92,92,0.06)',
+      }]
+    },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => `$${ctx.parsed.y.toFixed(2)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid:  { color: 'rgba(255,255,255,0.05)' },
+          ticks: {
+            color:         '#7a7f96',
+            font:          { size: 10 },
+            maxRotation:   0,
+            autoSkip:      true,
+            maxTicksLimit: 12,
+          }
+        },
+        y: {
+          grid:  { color: 'rgba(255,255,255,0.05)' },
+          ticks: {
+            color:    '#7a7f96',
+            font:     { size: 10 },
+            callback: v => '$' + v.toFixed(0)
+          }
+        }
+      }
+    }
+  });
+}
+
 function updateCharts(s) {
   if (pnlChartInst) pnlChartInst.destroy();
   if (monthChartInst) monthChartInst.destroy();
@@ -608,28 +682,31 @@ async function runBacktest() {
   document.getElementById('optBtn').disabled = true;
 
   const bars = await fetchBars();
-  if (!bars.length) { setStatus('No data fetched — check console for errors', 'error'); document.getElementById('runBtn').disabled=false; return; }
+  if (!bars.length) {
+    setStatus('No data fetched — check console', 'error');
+    document.getElementById('runBtn').disabled = false;
+    document.getElementById('optBtn').disabled = false;
+    return;
+  }
+
+  // Draw price chart immediately after fetch — before simulation
+  updatePriceChart(bars);
 
   setStatus(`Fetched ${bars.length} bars (${new Date(bars[0].t*1000).toLocaleDateString()} – ${new Date(bars[bars.length-1].t*1000).toLocaleDateString()}). Running simulation...`, 'running');
-
-  // Auto-suggest histogram scale based on price level
-  const avgPrice = bars.slice(-100).reduce((s,b)=>s+b.c,0)/100;
-  const suggestedHist = +(avgPrice * 0.0003).toFixed(3); // ~0.03% of price
-  console.log(`[AUTO] avg_price=${avgPrice.toFixed(2)} suggested_min_hist=${suggestedHist}`);
-  await new Promise(r=>setTimeout(r,10));
+  await new Promise(r => setTimeout(r, 10));
 
   const trades = runSimulation(bars, p);
   if (!trades.length) {
-    const avgPrice = bars.slice(-100).reduce((s,b)=>s+b.c,0)/100;
+    const avgPrice = bars.slice(-100).reduce((s,b) => s+b.c, 0) / 100;
     const suggestedHist = +(avgPrice * 0.0003).toFixed(3);
     setStatus(`No trades. Try: min histogram = ${suggestedHist}, ADX level = 20, SL = 0`, 'error');
-    document.getElementById('runBtn').disabled=false;
-    document.getElementById('optBtn').disabled=false;
+    document.getElementById('runBtn').disabled = false;
+    document.getElementById('optBtn').disabled = false;
     return;
   }
 
   const stats = computeStats(trades);
-  lastResult = { params: p, stats, trades };
+  lastResult  = { params: p, stats, trades };
 
   updateMetrics(stats);
   updateCharts(stats);
@@ -667,6 +744,7 @@ async function runOptimizer() {
   cartesian(0,{});
 
   const valid = combos.filter(c=>c.macd_fast<c.macd_slow);
+  updatePriceChart(bars);
   setStatus(`Testing ${valid.length} combinations...`, 'running');
 
   const results = [];
