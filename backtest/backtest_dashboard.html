@@ -143,7 +143,15 @@
       <div class="param-row"><label>Fast (Б)</label><input type="number" id="macd_fast" value="10" min="2" max="50"></div>
       <div class="param-row"><label>Slow (М)</label><input type="number" id="macd_slow" value="28" min="5" max="100"></div>
       <div class="param-row"><label>Signal (С)</label><input type="number" id="macd_signal" value="3" min="1" max="20"></div>
-      <div class="param-row"><label>Min histogram % of price</label><input type="number" id="min_hist" value="0.0008" min="0" step="0.0001"></div>
+      <div class="param-row">
+        <label>Min histogram %</label>
+        <input type="number" id="min_hist" value="0.0008" min="0.00001" max="0.01" step="0.0001"
+          style="width:72px" oninput="updateHistDisplay()">
+      </div>
+      <div style="font-size:10px;color:var(--muted);padding:2px 0 6px 0;display:flex;justify-content:space-between">
+        <span>= <span id="hist_abs_display">?</span> at current price</span>
+        <span id="hist_pct_display" style="color:var(--amber)"></span>
+      </div>
     </div>
   </div>
 
@@ -283,6 +291,23 @@
 <script>
 let lastResult = null;
 let pnlChartInst = null, monthChartInst = null, priceChartInst = null;
+let lastFetchedPrice = null;
+
+function updateHistDisplay() {
+  const pct = +document.getElementById('min_hist').value;
+  if (!pct) {
+    document.getElementById('hist_abs_display').textContent = '?';
+    document.getElementById('hist_pct_display').textContent = '';
+    return;
+  }
+  document.getElementById('hist_pct_display').textContent = (pct * 100).toFixed(4) + '%';
+  if (lastFetchedPrice) {
+    const abs = (pct * lastFetchedPrice).toFixed(4);
+    document.getElementById('hist_abs_display').textContent = '$' + abs;
+  } else {
+    document.getElementById('hist_abs_display').textContent = 'fetch data first';
+  }
+}
 
 document.getElementById('end_date').value = new Date().toISOString().split('T')[0];
 
@@ -754,6 +779,11 @@ async function runBacktest() {
     return;
   }
 
+  if (bars.length > 0) {
+    lastFetchedPrice = bars[bars.length - 1].c;
+    updateHistDisplay();
+  }
+
   // Draw price chart immediately after fetch — before simulation
   updatePriceChart(bars);
 
@@ -860,7 +890,7 @@ async function runOptimizer() {
     div.className = 'opt-row' + (i === 0 ? ' best' : '');
     div.innerHTML = `
       <span style="color:#7a7f96;min-width:20px">${i+1}</span>
-      <span>MACD(<b>${c.macd_fast}</b>,<b>${c.macd_slow}</b>,<b>${c.macd_signal}</b>) hist≥${(c.min_hist_pct*100).toFixed(3)}% ADX≥${c.adx_level}</span>
+      <span>MACD(<b>${c.macd_fast}</b>,<b>${c.macd_slow}</b>,<b>${c.macd_signal}</b>) hist≥${(c.min_hist_pct*100).toFixed(4)}% ADX≥${c.adx_level}</span>
       <span style="display:flex;gap:10px;align-items:center">
         <span class="tag ${s.totalPnl>=0?'green':'amber'}">${s.totalPnl>=0?'+':''}${s.totalPnl}%</span>
         <span style="color:#7a7f96">WR ${s.winRate}%</span>
@@ -886,7 +916,10 @@ function applyParams(p) {
   if (p.macd_fast)                   document.getElementById('macd_fast').value       = p.macd_fast;
   if (p.macd_slow)                   document.getElementById('macd_slow').value       = p.macd_slow;
   if (p.macd_signal)                 document.getElementById('macd_signal').value     = p.macd_signal;
-  if (p.min_hist_pips !== undefined) document.getElementById('min_hist').value        = p.min_hist_pips;
+  if (p.min_hist_pct !== undefined && p.min_hist_pct !== null) {
+    const val = parseFloat(p.min_hist_pct);
+    if (!isNaN(val)) { document.getElementById('min_hist').value = val.toFixed(6).replace(/\.?0+$/, ''); updateHistDisplay(); }
+  }
   if (p.adx_period)                  document.getElementById('adx_period').value      = p.adx_period;
   if (p.adx_level)                   document.getElementById('adx_level').value       = p.adx_level;
   if (p.session_start !== undefined) document.getElementById('sess_start').value      = p.session_start;
@@ -1015,7 +1048,10 @@ function loadProfile(id) {
   document.getElementById('macd_fast').value      = p.macd_fast;
   document.getElementById('macd_slow').value      = p.macd_slow;
   document.getElementById('macd_signal').value    = p.macd_signal;
-  document.getElementById('min_hist').value       = p.min_hist_pips;
+  if (p.min_hist_pct !== undefined) {
+    document.getElementById('min_hist').value = parseFloat(p.min_hist_pct).toFixed(6).replace(/\.?0+$/, '');
+    updateHistDisplay();
+  }
   document.getElementById('adx_period').value     = p.adx_period;
   document.getElementById('adx_level').value      = p.adx_level;
   document.getElementById('sess_start').value     = p.session_start;
@@ -1035,6 +1071,7 @@ function loadProfile(id) {
 
 // Initialize profiles on load
 renderProfiles();
+updateHistDisplay();
 </script>
 </body>
 </html>
