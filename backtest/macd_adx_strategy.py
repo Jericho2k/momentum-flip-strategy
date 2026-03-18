@@ -25,14 +25,14 @@ TIMEFRAME = "15"  # default candle interval in minutes (used by bridge and backt
 @dataclass
 class StrategyParams:
     # MACD
-    macd_fast:   int   = 8
-    macd_slow:   int   = 21
-    macd_signal: int   = 9
+    macd_fast:     int   = 12
+    macd_slow:     int   = 28
+    macd_signal:   int   = 5
     min_hist_pips: float = 0.1   # minimum histogram value to take signal
 
     # ADX
     adx_period: int   = 14
-    adx_level:  float = 25.0    # only trade when ADX >= this
+    adx_level:  float = 20.0    # only trade when ADX >= this
 
     # Session filter (UTC hours, set None to disable)
     session_start: Optional[int] = None
@@ -40,8 +40,13 @@ class StrategyParams:
     morning_stop:  bool = False
 
     # Risk
-    sl_pips:      float = 0.0          # hard stop in price units (0 = disabled)
-    leverage:     int   = 2
+    sl_pips:  float = 0.0          # hard stop in price units (0 = disabled)
+    leverage: int   = 2
+
+    # Regime filter — higher timeframe ADX
+    regime_adx_period: int   = 14
+    regime_adx_level:  float = 20.0   # daily ADX must be above this to trade
+    regime_enabled:    bool  = True
 
 
 # ── Indicator calculations ─────────────────────────────────────────────────────
@@ -179,10 +184,18 @@ def is_session_open(ts: int, prev_ts: int, params: StrategyParams) -> bool:
     return (not in_session(prev_ts, params)) and in_session(ts, params)
 
 
-def generate_signals(bars: list[Bar], params: StrategyParams) -> list[Signal]:
+def generate_signals(
+    bars: list[Bar],
+    params: StrategyParams,
+    regime_bars: list[Bar] = None,
+) -> list[Signal]:
     """
-    Walk through bars and generate trading signals.
-    Returns list of Signal objects.
+    Args:
+        bars:        15m bars for signal generation
+        params:      Strategy parameters
+        regime_bars: Daily bars for regime filter (optional).
+                     If provided and regime_enabled=True, signals are
+                     suppressed when daily ADX < regime_adx_level.
     """
     closes = [b.close for b in bars]
     highs  = [b.high  for b in bars]
@@ -191,6 +204,24 @@ def generate_signals(bars: list[Bar], params: StrategyParams) -> list[Signal]:
     macd   = macd_series(closes, params.macd_fast, params.macd_slow, params.macd_signal)
     hist   = macd["histogram"]
     adx    = adx_series(highs, lows, closes, params.adx_period)
+
+    # Build daily ADX lookup if regime filter enabled
+    regime_adx_map = {}
+    if params.regime_enabled and regime_bars:
+        r_closes = [b.close for b in regime_bars]
+        r_highs  = [b.high  for b in regime_bars]
+        r_lows   = [b.low   for b in regime_bars]
+        r_adx    = adx_series(r_highs, r_lows, r_closes, params.regime_adx_period)
+        for i, rb in enumerate(regime_bars):
+            if not math.isnan(r_adx[i]):
+                regime_adx_map[rb.timestamp] = r_adx[i]
+
+    def get_regime_adx(ts: int) -> float:
+        """Get the most recent daily ADX value at or before this timestamp."""
+        if not regime_adx_map:
+            return 999.0  # no filter — always pass
+        valid = [v for k, v in regime_adx_map.items() if k <= ts]
+        return valid[-1] if valid else 0.0
 
     signals   = []
     position  = None   # None, 'LONG', 'SHORT'
@@ -225,13 +256,24 @@ def generate_signals(bars: list[Bar], params: StrategyParams) -> list[Signal]:
                 position = None
             continue
 
-        # ADX filter
+        # 15m ADX filter
         if adx_now < params.adx_level:
             continue
 
         # Histogram pip filter
         if abs(h_now) < params.min_hist_pips:
             continue
+
+        # ── Regime filter ──────────────────────────────────────────
+        if params.regime_enabled:
+            regime_adx = get_regime_adx(bar.timestamp)
+            if regime_adx < params.regime_adx_level:
+                if position is not None:
+                    signals.append(Signal(i, bar.timestamp, 'CLOSE', price,
+                                          "regime_filter", h_now, adx_now))
+                    position = None
+                continue
+        # ──────────────────────────────────────────────────────────
 
         # MACD histogram crossover
         cross_up   = h_prev <= 0 and h_now > 0

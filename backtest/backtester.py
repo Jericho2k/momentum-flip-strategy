@@ -303,8 +303,35 @@ def compute_stats(trades: list[Trade], params: StrategyParams, include_trades: b
     )
 
 
-def run_backtest(bars: list[Bar], params: StrategyParams, include_trades: bool = True) -> BacktestResult:
-    signals = generate_signals(bars, params)
+def run_backtest(
+    bars: list[Bar],
+    params: StrategyParams,
+    include_trades: bool = True,
+    regime_bars: list[Bar] = None,
+) -> BacktestResult:
+    """
+    Args:
+        bars:           15m bars
+        params:         Strategy params
+        include_trades: Include full trade list in result
+        regime_bars:    Daily bars for regime filter.
+                        If None and regime_enabled, fetches automatically.
+    """
+    if params.regime_enabled and regime_bars is None and len(bars) > 0:
+        start_dt  = datetime.fromtimestamp(bars[0].timestamp, tz=timezone.utc)
+        start_str = start_dt.strftime("%Y-%m-%d")
+        log.info(f"Fetching daily bars for regime filter (from {start_str})...")
+        try:
+            regime_bars = fetch_binance_ohlcv(
+                symbol     = "SOLUSDT",
+                interval   = "1d",
+                start_date = start_str,
+            )
+        except Exception as e:
+            log.warning(f"Could not fetch regime bars: {e} — regime filter disabled")
+            regime_bars = None
+
+    signals = generate_signals(bars, params, regime_bars=regime_bars)
     trades  = simulate_trades(bars, signals, params)
     return compute_stats(trades, params, include_trades)
 

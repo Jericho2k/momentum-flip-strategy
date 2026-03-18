@@ -38,18 +38,23 @@ API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 BASE_URL   = "https://api-demo.bybit.com"  # demo trading
 
 PARAMS = StrategyParams(
-    macd_fast     = 8,
-    macd_slow     = 21,
-    macd_signal   = 9,
-    min_hist_pips = 0.1,
-    adx_period    = 14,
-    adx_level     = 25.0,
-    session_start = None,
-    session_end   = None,
-    morning_stop  = False,
-    sl_pips       = 0.0,
-    leverage      = 2,
+    macd_fast          = 8,
+    macd_slow          = 21,
+    macd_signal        = 9,
+    min_hist_pips      = 0.1,
+    adx_period         = 14,
+    adx_level          = 25.0,
+    session_start      = None,
+    session_end        = None,
+    morning_stop       = False,
+    sl_pips            = 0.0,
+    leverage           = 2,
+    regime_adx_period  = 14,
+    regime_adx_level   = 20.0,
+    regime_enabled     = True,
 )
+
+DAILY_CANDLES = 60  # daily bars to fetch for regime filter
 
 # ── Raw Bybit HTTP client ──────────────────────────────────────────────────────
 
@@ -167,6 +172,47 @@ def get_candles() -> list[Bar]:
         return []
 
 
+def get_daily_candles() -> list[Bar]:
+    resp = httpx.get(
+        f"{BASE_URL}/v5/market/kline",
+        params={"category": CATEGORY, "symbol": SYMBOL, "interval": "D", "limit": DAILY_CANDLES},
+        timeout=10
+    ).json()
+    try:
+        raw = list(reversed(resp["result"]["list"]))
+        return [
+            Bar(
+                timestamp = int(c[0]) // 1000,
+                open      = float(c[1]),
+                high      = float(c[2]),
+                low       = float(c[3]),
+                close     = float(c[4]),
+                volume    = float(c[5]),
+            )
+            for c in raw
+        ]
+    except Exception as e:
+        log.error(f"Daily candle fetch failed: {e}")
+        return []
+
+
+def check_regime(daily_bars: list[Bar]) -> bool:
+    """Returns True if daily ADX >= regime_adx_level (OK to trade), False otherwise."""
+    if not PARAMS.regime_enabled or not daily_bars:
+        return True
+    from backtest.macd_adx_strategy import adx_series
+    highs  = [b.high  for b in daily_bars]
+    lows   = [b.low   for b in daily_bars]
+    closes = [b.close for b in daily_bars]
+    adx    = adx_series(highs, lows, closes, PARAMS.regime_adx_period)
+    valid  = [v for v in adx if not math.isnan(v)]
+    if not valid:
+        return True
+    latest_adx = valid[-1]
+    log.info(f"Regime daily ADX={latest_adx:.2f} (threshold={PARAMS.regime_adx_level})")
+    return latest_adx >= PARAMS.regime_adx_level
+
+
 def calc_qty(balance: float, price: float) -> float:
     notional = balance * 0.10 * PARAMS.leverage
     qty = round(notional / price, 1)
@@ -241,17 +287,19 @@ def run():
         try:
             log.info(f"── {datetime.now(timezone.utc).strftime('%H:%M UTC')} ──")
 
-            bars = get_candles()
+            bars        = get_candles()
+            daily_bars  = get_daily_candles()
             if len(bars) < 60:
                 log.warning(f"Only {len(bars)} bars — waiting")
                 time.sleep(60)
                 continue
 
-            signals  = generate_signals(bars, PARAMS)
-            position = get_position()
-            balance  = get_balance()
-            price    = bars[-1].close
-            last_sig = signals[-1] if signals else None
+            in_regime = check_regime(daily_bars)
+            signals   = generate_signals(bars, PARAMS, regime_bars=daily_bars)
+            position  = get_position()
+            balance   = get_balance()
+            price     = bars[-1].close
+            last_sig  = signals[-1] if signals else None
 
             log.info(
                 f"SOL @ ${price:.3f} | balance=${balance:.2f} | "
@@ -269,6 +317,16 @@ def run():
                 "balance":   balance,
             }
             log_decision(decision)
+
+            if not in_regime:
+                log.info("Regime filter: choppy market — holding flat")
+                if position:
+                    log.info("Closing position due to regime filter")
+                    close_position(position)
+                    notify_telegram(f"Position closed — regime filter (low daily ADX) @ ${price:.3f}")
+                    current_signal = None
+                time.sleep(LOOP_INTERVAL)
+                continue
 
             if last_sig is None:
                 log.info("No signal — holding")
