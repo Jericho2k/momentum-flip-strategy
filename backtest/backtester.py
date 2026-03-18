@@ -94,132 +94,70 @@ def fetch_bybit_ohlcv(
     return bars
 
 
-def fetch_coingecko_ohlcv(
-    coin_id: str = "solana",
-    days: int = 365,
-    vs_currency: str = "usd",
+def fetch_binance_ohlcv(
+    symbol: str = "SOLUSDT",
+    interval: str = "1d",
+    start_date: str = "2021-01-01",
 ) -> list[Bar]:
     """
-    Fetch OHLCV data from CoinGecko free API.
-    Returns H1 bars for up to 90 days, or H4 bars for up to 365 days,
-    or daily bars for max history (2020–present).
-
-    No API key required for free tier.
-    Rate limit: 30 calls/minute — we only need 1 call.
+    Fetch historical OHLCV from Binance public API.
+    No API key required. Daily bars from 2021 onwards for SOL.
 
     Args:
-        coin_id:     CoinGecko coin ID (solana, bitcoin, ethereum)
-        days:        Number of days of history (up to 'max' for full history)
-        vs_currency: Quote currency (usd, eur, btc)
+        symbol:     Trading pair (SOLUSDT, BTCUSDT, etc.)
+        interval:   Candle size (1d, 4h, 1h)
+        start_date: Start date string YYYY-MM-DD
     """
-    import time as _time
+    log.info(f"Fetching {symbol} {interval} from Binance (from {start_date})...")
 
-    # CoinGecko auto-selects granularity based on days:
-    # 1 day       → 5-minute intervals
-    # 2–90 days   → hourly intervals
-    # 91–365 days → daily intervals
-    # 'max'       → daily intervals (from coin inception)
+    base_url  = "https://api.binance.com/api/v3/klines"
+    start_ms  = int(datetime.strptime(start_date, "%Y-%m-%d")
+                    .replace(tzinfo=timezone.utc).timestamp() * 1000)
+    all_bars  = []
+    limit     = 1000
 
-    log.info(f"Fetching {coin_id} OHLCV from CoinGecko (days={days})...")
-
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-    params = {
-        "vs_currency": vs_currency,
-        "days":        str(days),
-    }
-
-    try:
-        r = requests.get(url, params=params, timeout=30)
-        r.raise_for_status()
-        raw = r.json()
-    except Exception as e:
-        log.error(f"CoinGecko fetch failed: {e}")
-        return []
-
-    if not raw or not isinstance(raw, list):
-        log.error(f"CoinGecko returned unexpected data: {raw}")
-        return []
-
-    # CoinGecko OHLC format: [timestamp_ms, open, high, low, close]
-    bars = []
-    for c in raw:
+    while True:
+        params = {
+            "symbol":    symbol,
+            "interval":  interval,
+            "startTime": start_ms,
+            "limit":     limit,
+        }
         try:
-            bars.append(Bar(
+            r = requests.get(base_url, params=params, timeout=15)
+            r.raise_for_status()
+            raw = r.json()
+        except Exception as e:
+            log.error(f"Binance fetch error: {e}")
+            break
+
+        if not raw:
+            break
+
+        for c in raw:
+            all_bars.append(Bar(
                 timestamp = int(c[0]) // 1000,
                 open      = float(c[1]),
                 high      = float(c[2]),
                 low       = float(c[3]),
                 close     = float(c[4]),
-                volume    = 0.0,  # CoinGecko OHLC endpoint doesn't include volume
+                volume    = float(c[5]),
             ))
-        except (IndexError, ValueError):
-            continue
 
-    bars.sort(key=lambda b: b.timestamp)
-    log.info(f"CoinGecko: {len(bars)} bars fetched")
-    if bars:
-        log.info(f"From: {datetime.fromtimestamp(bars[0].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')}")
-        log.info(f"To:   {datetime.fromtimestamp(bars[-1].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')}")
-        log.info(f"Price range: ${min(b.low for b in bars):.2f} – ${max(b.high for b in bars):.2f}")
+        if len(raw) < limit:
+            break
 
-    return bars
+        start_ms = int(raw[-1][0]) + 1
+        time.sleep(0.2)
 
+    all_bars.sort(key=lambda b: b.timestamp)
+    log.info(f"Binance: {len(all_bars)} bars fetched")
+    if all_bars:
+        log.info(f"From: {datetime.fromtimestamp(all_bars[0].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')}")
+        log.info(f"To:   {datetime.fromtimestamp(all_bars[-1].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')}")
+        log.info(f"Price range: ${min(b.low for b in all_bars):.2f} – ${max(b.high for b in all_bars):.2f}")
 
-def fetch_coingecko_full_history(
-    coin_id: str = "solana",
-    vs_currency: str = "usd",
-) -> list[Bar]:
-    """
-    Fetch ~2 years of daily OHLC from CoinGecko free tier.
-    Uses the /ohlc endpoint with days=max (free, no key needed).
-    """
-    log.info(f"Fetching {coin_id} OHLC from CoinGecko free tier...")
-
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-    params = {
-        "vs_currency": vs_currency,
-        "days":        "max",
-    }
-
-    try:
-        r = requests.get(
-            url,
-            params=params,
-            headers={"accept": "application/json"},
-            timeout=30
-        )
-        r.raise_for_status()
-        raw = r.json()
-    except Exception as e:
-        log.error(f"CoinGecko fetch failed: {e}")
-        return []
-
-    if not raw or not isinstance(raw, list):
-        log.error(f"Unexpected response: {raw}")
-        return []
-
-    bars = []
-    for c in raw:
-        try:
-            bars.append(Bar(
-                timestamp = int(c[0]) // 1000,
-                open      = float(c[1]),
-                high      = float(c[2]),
-                low       = float(c[3]),
-                close     = float(c[4]),
-                volume    = 0.0,
-            ))
-        except (IndexError, ValueError):
-            continue
-
-    bars.sort(key=lambda b: b.timestamp)
-    log.info(f"Fetched {len(bars)} bars")
-    if bars:
-        log.info(f"From: {datetime.fromtimestamp(bars[0].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')}")
-        log.info(f"To:   {datetime.fromtimestamp(bars[-1].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')}")
-        log.info(f"Price range: ${min(b.low for b in bars):.2f} – ${max(b.high for b in bars):.2f}")
-
-    return bars
+    return all_bars
 
 
 # ── Trade simulation ───────────────────────────────────────────────────────────
@@ -441,16 +379,15 @@ if __name__ == "__main__":
 
     mode = sys.argv[1] if len(sys.argv) > 1 else "backtest"
 
-    if mode == "coingecko":
-        log.info("Fetching full SOL history from CoinGecko (daily bars, 2020–present)...")
-        bars = fetch_coingecko_full_history("solana")
+    if mode == "coingecko":  # keeping same CLI arg for convenience
+        log.info("Fetching full SOL history from Binance (daily, 2021–present)...")
+        bars = fetch_binance_ohlcv("SOLUSDT", "1d", "2021-01-01")
         if not bars:
             log.error("No data fetched")
             sys.exit(1)
-        log.info(f"Running backtest on {len(bars)} daily bars...")
         params = StrategyParams()
         result = run_backtest(bars, params)
-        print(f"\n=== COINGECKO FULL HISTORY BACKTEST ===")
+        print(f"\n=== BINANCE FULL HISTORY BACKTEST ===")
         print(f"Period:      {datetime.fromtimestamp(bars[0].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')} → {datetime.fromtimestamp(bars[-1].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')}")
         print(f"Bars:        {len(bars)} daily")
         print(f"Trades:      {result.total_trades}")
@@ -462,13 +399,12 @@ if __name__ == "__main__":
         print(f"Flat months: {result.flat_months}")
 
     elif mode == "optimize_cg":
-        log.info("Fetching CoinGecko data for optimization...")
-        bars = fetch_coingecko_full_history("solana")
+        log.info("Fetching Binance data for full-history optimization...")
+        bars = fetch_binance_ohlcv("SOLUSDT", "1d", "2021-01-01")
         if not bars:
             sys.exit(1)
-        log.info("Running optimizer on full history...")
         top = run_optimizer(bars, top_n=10)
-        print("\n=== TOP 10 PARAMS — FULL COINGECKO HISTORY ===")
+        print("\n=== TOP 10 PARAMS — BINANCE FULL HISTORY ===")
         for i, r in enumerate(top):
             p = r.params
             print(
