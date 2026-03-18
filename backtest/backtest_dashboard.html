@@ -151,7 +151,25 @@
     <div class="section-title">ADX parameters</div>
     <div class="param-group">
       <div class="param-row"><label>Period</label><input type="number" id="adx_period" value="14" min="5" max="30"></div>
-      <div class="param-row"><label>Min level (Ур)</label><input type="number" id="adx_level" value="45" min="10" max="80"></div>
+      <div class="param-row"><label>Min level (Ур)</label><input type="number" id="adx_level" value="20" min="10" max="80"></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="section-title">Regime filter (daily ADX)</div>
+    <div class="param-group">
+      <div class="param-row">
+        <label>Enabled</label>
+        <input type="checkbox" id="regime_enabled" checked>
+      </div>
+      <div class="param-row">
+        <label>Daily ADX period</label>
+        <input type="number" id="regime_adx_period" value="14" min="5" max="30">
+      </div>
+      <div class="param-row">
+        <label>Daily ADX min</label>
+        <input type="number" id="regime_adx_level" value="20" min="10" max="50">
+      </div>
     </div>
   </div>
 
@@ -268,14 +286,17 @@ function getParams() {
     min_hist_pips: +document.getElementById('min_hist').value,
     adx_period:    +document.getElementById('adx_period').value,
     adx_level:     +document.getElementById('adx_level').value,
-    session_start: +document.getElementById('sess_start').value,
-    session_end:   +document.getElementById('sess_end').value,
-    morning_stop:  document.getElementById('morning_stop').checked,
-    sl_pips:       +document.getElementById('sl_pips').value,
-    leverage:      +document.getElementById('leverage').value,
-    data_source:   document.getElementById('data_source').value,
-    start_date:    document.getElementById('start_date').value,
-    end_date:      document.getElementById('end_date').value,
+    session_start:     +document.getElementById('sess_start').value,
+    session_end:       +document.getElementById('sess_end').value,
+    morning_stop:      document.getElementById('morning_stop').checked,
+    sl_pips:           +document.getElementById('sl_pips').value,
+    leverage:          +document.getElementById('leverage').value,
+    regime_enabled:    document.getElementById('regime_enabled').checked,
+    regime_adx_period: +document.getElementById('regime_adx_period').value,
+    regime_adx_level:  +document.getElementById('regime_adx_level').value,
+    data_source:       document.getElementById('data_source').value,
+    start_date:        document.getElementById('start_date').value,
+    end_date:          document.getElementById('end_date').value,
   };
 }
 
@@ -353,10 +374,30 @@ function runSimulation(bars, p) {
   const hist = macdHistogram(closes, p.macd_fast, p.macd_slow, p.macd_signal);
   const adx  = adxArr(highs, lows, closes, p.adx_period);
 
+  // Build daily bars from 15m/H1 bars for regime filter
+  const dayMap = {};
+  bars.forEach(b => {
+    const d = new Date(b.t * 1000);
+    const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
+    if (!dayMap[key]) dayMap[key] = { t: b.t, h: b.h, l: b.l, c: b.c };
+    else { dayMap[key].h = Math.max(dayMap[key].h, b.h); dayMap[key].l = Math.min(dayMap[key].l, b.l); dayMap[key].c = b.c; }
+  });
+  const dailyBars = Object.values(dayMap).sort((a,b) => a.t - b.t);
+  const dAdx = adxArr(dailyBars.map(b=>b.h), dailyBars.map(b=>b.l), dailyBars.map(b=>b.c), p.regime_adx_period || 14);
+  const regimeMap = {};
+  dailyBars.forEach((b, i) => { if (!isNaN(dAdx[i])) regimeMap[b.t] = dAdx[i]; });
+  const regimeTimes = Object.keys(regimeMap).map(Number).sort((a,b)=>a-b);
+  function getRegimeAdx(ts) {
+    if (!p.regime_enabled || regimeTimes.length === 0) return 999;
+    let val = 0;
+    for (const rt of regimeTimes) { if (rt <= ts) val = regimeMap[rt]; else break; }
+    return val;
+  }
+
   const warmup = p.macd_slow + p.macd_signal + p.adx_period + 5;
   const trades = [];
   let pos = null;
-  let dbgNaN=0, dbgADX=0, dbgHist=0, dbgSession=0, dbgCross=0;
+  let dbgNaN=0, dbgADX=0, dbgHist=0, dbgSession=0, dbgCross=0, dbgRegime=0;
 
   function inSession(ts) {
     if (p.session_start === 0 && p.session_end >= 24) return true;
@@ -410,6 +451,16 @@ function runSimulation(bars, p) {
     // Histogram filter
     if (Math.abs(h) < p.min_hist_pips) { dbgHist++; continue; }
 
+    // Regime filter — daily ADX
+    if (p.regime_enabled) {
+      const regAdx = getRegimeAdx(bar.t);
+      if (regAdx < (p.regime_adx_level || 20)) {
+        dbgRegime++;
+        if (pos) closeTrade(bar.c, bar.t, 'regime_filter', i);
+        continue;
+      }
+    }
+
     const crossUp   = hp<=0 && h>0;
     const crossDown = hp>=0 && h<0;
     if (crossUp||crossDown) dbgCross++;
@@ -429,7 +480,7 @@ function runSimulation(bars, p) {
   const histP95 = [...validHist.map(Math.abs)].sort((a,b)=>a-b)[Math.floor(validHist.length*0.95)].toFixed(4);
   const adxMax  = Math.max(...validAdx).toFixed(2);
   const adxMed  = [...validAdx].sort((a,b)=>a-b)[Math.floor(validAdx.length*0.5)].toFixed(2);
-  console.log(`[SIM] bars=${bars.length} warmup=${warmup} NaN_skipped=${dbgNaN} session_blocked=${dbgSession} adx_blocked=${dbgADX} hist_blocked=${dbgHist} crosses_seen=${dbgCross} trades=${trades.length}`);
+  console.log(`[SIM] bars=${bars.length} warmup=${warmup} NaN_skipped=${dbgNaN} session_blocked=${dbgSession} adx_blocked=${dbgADX} hist_blocked=${dbgHist} regime_blocked=${dbgRegime} crosses_seen=${dbgCross} trades=${trades.length}`);
   console.log(`[INDICATORS] hist_abs_max=${histMax} hist_p95=${histP95} | adx_max=${adxMax} adx_median=${adxMed}`);
   return trades;
 }
@@ -773,20 +824,23 @@ async function runOptimizer() {
     const c = r.params, s = r.stats;
     const p = getParams(); // get current data source / dates
     const fullParams = {
-      macd_fast:     c.macd_fast,
-      macd_slow:     c.macd_slow,
-      macd_signal:   c.macd_signal,
-      min_hist_pips: c.min_hist_pips,
-      adx_period:    c.adx_period     || 14,
-      adx_level:     c.adx_level,
-      session_start: p.session_start,
-      session_end:   p.session_end,
-      morning_stop:  p.morning_stop,
-      sl_pips:       p.sl_pips,
-      leverage:      p.leverage,
-      data_source:   p.data_source,
-      start_date:    p.start_date,
-      end_date:      p.end_date,
+      macd_fast:         c.macd_fast,
+      macd_slow:         c.macd_slow,
+      macd_signal:       c.macd_signal,
+      min_hist_pips:     c.min_hist_pips,
+      adx_period:        c.adx_period     || 14,
+      adx_level:         c.adx_level,
+      session_start:     p.session_start,
+      session_end:       p.session_end,
+      morning_stop:      p.morning_stop,
+      sl_pips:           p.sl_pips,
+      leverage:          p.leverage,
+      regime_enabled:    p.regime_enabled,
+      regime_adx_period: p.regime_adx_period,
+      regime_adx_level:  p.regime_adx_level,
+      data_source:       p.data_source,
+      start_date:        p.start_date,
+      end_date:          p.end_date,
     };
 
     const div = document.createElement('div');
@@ -824,12 +878,15 @@ function applyParams(p) {
   if (p.adx_level)                   document.getElementById('adx_level').value       = p.adx_level;
   if (p.session_start !== undefined) document.getElementById('sess_start').value      = p.session_start;
   if (p.session_end   !== undefined) document.getElementById('sess_end').value        = p.session_end;
-  if (p.morning_stop  !== undefined) document.getElementById('morning_stop').checked  = p.morning_stop;
-  if (p.sl_pips       !== undefined) document.getElementById('sl_pips').value         = p.sl_pips;
-  if (p.leverage)                    document.getElementById('leverage').value        = p.leverage;
-  if (p.data_source)                 document.getElementById('data_source').value     = p.data_source;
-  if (p.start_date)                  document.getElementById('start_date').value      = p.start_date;
-  if (p.end_date)                    document.getElementById('end_date').value        = p.end_date;
+  if (p.morning_stop     !== undefined) document.getElementById('morning_stop').checked     = p.morning_stop;
+  if (p.sl_pips          !== undefined) document.getElementById('sl_pips').value            = p.sl_pips;
+  if (p.leverage)                       document.getElementById('leverage').value           = p.leverage;
+  if (p.regime_enabled   !== undefined) document.getElementById('regime_enabled').checked   = p.regime_enabled;
+  if (p.regime_adx_period)              document.getElementById('regime_adx_period').value  = p.regime_adx_period;
+  if (p.regime_adx_level)               document.getElementById('regime_adx_level').value   = p.regime_adx_level;
+  if (p.data_source)                    document.getElementById('data_source').value        = p.data_source;
+  if (p.start_date)                     document.getElementById('start_date').value         = p.start_date;
+  if (p.end_date)                       document.getElementById('end_date').value           = p.end_date;
   setStatus('Params loaded — hit Run Backtest to confirm', 'done');
 }
 
@@ -953,6 +1010,9 @@ function loadProfile(id) {
   document.getElementById('morning_stop').checked = p.morning_stop;
   document.getElementById('sl_pips').value        = p.sl_pips;
   document.getElementById('leverage').value       = p.leverage;
+  if (p.regime_enabled   !== undefined) document.getElementById('regime_enabled').checked   = p.regime_enabled;
+  if (p.regime_adx_period)              document.getElementById('regime_adx_period').value  = p.regime_adx_period;
+  if (p.regime_adx_level)               document.getElementById('regime_adx_level').value   = p.regime_adx_level;
   if (p.data_source) document.getElementById('data_source').value = p.data_source;
   if (p.start_date)  document.getElementById('start_date').value  = p.start_date;
   if (p.end_date)    document.getElementById('end_date').value    = p.end_date;
