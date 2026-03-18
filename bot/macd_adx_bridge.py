@@ -35,7 +35,7 @@ TRADE_LOG     = Path("trade_log_macd.jsonl")
 
 API_KEY    = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
-BASE_URL   = "https://api-testnet.bybit.com"  # demo trading
+BASE_URL   = "https://api-demo.bybit.com"  # demo trading
 
 PARAMS = StrategyParams(
     macd_fast     = 8,

@@ -8,3 +8,5 @@ venv/
 trade_log.jsonl
 .DS_Store
 Thumbs.db
+test_auth.py
+trade_log_macd.jsonl
