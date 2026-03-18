@@ -315,9 +315,9 @@ PARAM_GRID = {
     "macd_fast":     [8, 10, 12],
     "macd_slow":     [21, 26, 28],
     "macd_signal":   [3, 5, 9],
-    "min_hist_pips": [2.0, 3.3, 5.0],
+    "min_hist_pips": [0.01, 0.02, 0.05],  # scaled for 15m
     "adx_period":    [14],
-    "adx_level":     [35.0, 40.0, 45.0],
+    "adx_level":     [20.0, 25.0, 30.0],
 }
 
 
@@ -381,7 +381,7 @@ if __name__ == "__main__":
 
     if mode == "coingecko":  # keeping same CLI arg for convenience
         log.info("Fetching full SOL history from Binance (daily, 2021–present)...")
-        bars = fetch_binance_ohlcv("SOLUSDT", "1d", "2021-01-01")
+        bars = fetch_binance_ohlcv("SOLUSDT", "15m", "2021-01-01")
         if not bars:
             log.error("No data fetched")
             sys.exit(1)

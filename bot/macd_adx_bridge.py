@@ -30,7 +30,7 @@ log = logging.getLogger("macd_adx_bridge")
 SYMBOL        = "SOLUSDT"
 CATEGORY      = "linear"
 LOOP_INTERVAL = 300
-CANDLES       = 120
+CANDLES       = 200  # need more bars for warmup on 15m
 TRADE_LOG     = Path("trade_log_macd.jsonl")
 
 API_KEY    = os.getenv("BYBIT_API_KEY", "")
@@ -146,7 +146,7 @@ def get_position() -> dict:
 def get_candles() -> list[Bar]:
     resp = httpx.get(
         f"{BASE_URL}/v5/market/kline",
-        params={"category": CATEGORY, "symbol": SYMBOL, "interval": "60", "limit": CANDLES},
+        params={"category": CATEGORY, "symbol": SYMBOL, "interval": "15", "limit": CANDLES},
         timeout=10
     ).json()
     try:
