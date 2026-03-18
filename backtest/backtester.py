@@ -342,7 +342,7 @@ PARAM_GRID = {
     "macd_fast":     [8, 10, 12],
     "macd_slow":     [21, 26, 28],
     "macd_signal":   [3, 5, 9],
-    "min_hist_pips": [0.01, 0.02, 0.05],  # scaled for 15m
+    "min_hist_pct":  [0.0003, 0.0008, 0.0015],  # 0.03%, 0.08%, 0.15% of price
     "adx_period":    [14],
     "adx_level":     [20.0, 25.0, 30.0],
 }
@@ -376,12 +376,12 @@ def run_optimizer(
         params = StrategyParams(**{k: v for k, v in p.items() if hasattr(StrategyParams, k) or k in StrategyParams.__dataclass_fields__})
         # Only set fields that exist on StrategyParams
         params = StrategyParams(
-            macd_fast     = p.get("macd_fast",     10),
-            macd_slow     = p.get("macd_slow",     28),
-            macd_signal   = p.get("macd_signal",    3),
-            min_hist_pips = p.get("min_hist_pips", 3.3),
-            adx_period    = p.get("adx_period",    14),
-            adx_level     = p.get("adx_level",     45.0),
+            macd_fast    = p.get("macd_fast",    10),
+            macd_slow    = p.get("macd_slow",    28),
+            macd_signal  = p.get("macd_signal",   3),
+            min_hist_pct = p.get("min_hist_pct", 0.0008),
+            adx_period   = p.get("adx_period",   14),
+            adx_level    = p.get("adx_level",    20.0),
         )
 
         result = run_backtest(bars, params, include_trades=False)
@@ -436,7 +436,7 @@ if __name__ == "__main__":
             p = r.params
             print(
                 f"{i+1:2d}. MACD({p['macd_fast']},{p['macd_slow']},{p['macd_signal']}) "
-                f"hist≥{p['min_hist_pips']} ADX({p['adx_period']},≥{p['adx_level']}) | "
+                f"hist≥{p['min_hist_pct']*100:.3f}% ADX({p['adx_period']},≥{p['adx_level']}) | "
                 f"PnL={r.total_pnl_pct:.1f}% WR={r.win_rate:.1f}% "
                 f"Sharpe={r.sharpe:.3f} DD={r.max_drawdown_pct:.1f}% "
                 f"Trades={r.total_trades} FlatMonths={r.flat_months}"
@@ -451,7 +451,7 @@ if __name__ == "__main__":
             p = r.params
             print(
                 f"{i+1:2d}. MACD({p['macd_fast']},{p['macd_slow']},{p['macd_signal']}) "
-                f"hist≥{p['min_hist_pips']} ADX({p['adx_period']},≥{p['adx_level']}) | "
+                f"hist≥{p['min_hist_pct']*100:.3f}% ADX({p['adx_period']},≥{p['adx_level']}) | "
                 f"PnL={r.total_pnl_pct:.1f}% WR={r.win_rate:.1f}% "
                 f"Sharpe={r.sharpe:.3f} DD={r.max_drawdown_pct:.1f}% "
                 f"Trades={r.total_trades} FlatMonths={r.flat_months}"

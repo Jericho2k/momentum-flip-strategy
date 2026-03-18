@@ -28,7 +28,7 @@ class StrategyParams:
     macd_fast:     int   = 12
     macd_slow:     int   = 28
     macd_signal:   int   = 5
-    min_hist_pips: float = 0.1   # minimum histogram value to take signal
+    min_hist_pct:  float = 0.0008  # minimum histogram as % of price (e.g. 0.08%)
 
     # ADX
     adx_period: int   = 14
@@ -260,8 +260,9 @@ def generate_signals(
         if adx_now < params.adx_level:
             continue
 
-        # Histogram pip filter
-        if abs(h_now) < params.min_hist_pips:
+        # Histogram filter — relative to price so it scales across symbols
+        min_hist_abs = price * params.min_hist_pct
+        if abs(h_now) < min_hist_abs:
             continue
 
         # ── Regime filter ──────────────────────────────────────────
