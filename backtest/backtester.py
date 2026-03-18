@@ -94,6 +94,134 @@ def fetch_bybit_ohlcv(
     return bars
 
 
+def fetch_coingecko_ohlcv(
+    coin_id: str = "solana",
+    days: int = 365,
+    vs_currency: str = "usd",
+) -> list[Bar]:
+    """
+    Fetch OHLCV data from CoinGecko free API.
+    Returns H1 bars for up to 90 days, or H4 bars for up to 365 days,
+    or daily bars for max history (2020–present).
+
+    No API key required for free tier.
+    Rate limit: 30 calls/minute — we only need 1 call.
+
+    Args:
+        coin_id:     CoinGecko coin ID (solana, bitcoin, ethereum)
+        days:        Number of days of history (up to 'max' for full history)
+        vs_currency: Quote currency (usd, eur, btc)
+    """
+    import time as _time
+
+    # CoinGecko auto-selects granularity based on days:
+    # 1 day       → 5-minute intervals
+    # 2–90 days   → hourly intervals
+    # 91–365 days → daily intervals
+    # 'max'       → daily intervals (from coin inception)
+
+    log.info(f"Fetching {coin_id} OHLCV from CoinGecko (days={days})...")
+
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+    params = {
+        "vs_currency": vs_currency,
+        "days":        str(days),
+    }
+
+    try:
+        r = requests.get(url, params=params, timeout=30)
+        r.raise_for_status()
+        raw = r.json()
+    except Exception as e:
+        log.error(f"CoinGecko fetch failed: {e}")
+        return []
+
+    if not raw or not isinstance(raw, list):
+        log.error(f"CoinGecko returned unexpected data: {raw}")
+        return []
+
+    # CoinGecko OHLC format: [timestamp_ms, open, high, low, close]
+    bars = []
+    for c in raw:
+        try:
+            bars.append(Bar(
+                timestamp = int(c[0]) // 1000,
+                open      = float(c[1]),
+                high      = float(c[2]),
+                low       = float(c[3]),
+                close     = float(c[4]),
+                volume    = 0.0,  # CoinGecko OHLC endpoint doesn't include volume
+            ))
+        except (IndexError, ValueError):
+            continue
+
+    bars.sort(key=lambda b: b.timestamp)
+    log.info(f"CoinGecko: {len(bars)} bars fetched")
+    if bars:
+        log.info(f"From: {datetime.fromtimestamp(bars[0].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')}")
+        log.info(f"To:   {datetime.fromtimestamp(bars[-1].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')}")
+        log.info(f"Price range: ${min(b.low for b in bars):.2f} – ${max(b.high for b in bars):.2f}")
+
+    return bars
+
+
+def fetch_coingecko_full_history(
+    coin_id: str = "solana",
+    vs_currency: str = "usd",
+) -> list[Bar]:
+    """
+    Fetch maximum available history from CoinGecko (daily bars from 2020).
+    Uses the market_chart endpoint which provides more granular data than ohlc.
+    Free tier, no API key needed.
+    """
+    log.info(f"Fetching full {coin_id} history from CoinGecko...")
+
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    params = {
+        "vs_currency": vs_currency,
+        "days":        "max",
+        "interval":    "daily",
+    }
+
+    try:
+        r = requests.get(url, params=params, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        log.error(f"CoinGecko full history fetch failed: {e}")
+        return []
+
+    prices  = data.get("prices", [])
+    volumes = data.get("total_volumes", [])
+
+    vol_map = {int(v[0]) // 1000: float(v[1]) for v in volumes}
+
+    bars = []
+    for i in range(1, len(prices)):
+        ts    = int(prices[i][0]) // 1000
+        close = float(prices[i][1])
+        prev  = float(prices[i-1][1])
+        # Approximate OHLC from daily close prices
+        high  = max(close, prev) * 1.002
+        low   = min(close, prev) * 0.998
+        bars.append(Bar(
+            timestamp = ts,
+            open      = prev,
+            high      = high,
+            low       = low,
+            close     = close,
+            volume    = vol_map.get(ts, 0.0),
+        ))
+
+    bars.sort(key=lambda b: b.timestamp)
+    log.info(f"Full history: {len(bars)} daily bars")
+    if bars:
+        log.info(f"From: {datetime.fromtimestamp(bars[0].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')}")
+        log.info(f"To:   {datetime.fromtimestamp(bars[-1].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')}")
+
+    return bars
+
+
 # ── Trade simulation ───────────────────────────────────────────────────────────
 
 @dataclass
@@ -313,12 +441,48 @@ if __name__ == "__main__":
 
     mode = sys.argv[1] if len(sys.argv) > 1 else "backtest"
 
-    log.info(f"Fetching SOL/USDT H1 data (365 days)...")
-    bars = fetch_bybit_ohlcv("SOLUSDT", "60", days=365)
+    if mode == "coingecko":
+        log.info("Fetching full SOL history from CoinGecko (daily bars, 2020–present)...")
+        bars = fetch_coingecko_full_history("solana")
+        if not bars:
+            log.error("No data fetched")
+            sys.exit(1)
+        log.info(f"Running backtest on {len(bars)} daily bars...")
+        params = StrategyParams()
+        result = run_backtest(bars, params)
+        print(f"\n=== COINGECKO FULL HISTORY BACKTEST ===")
+        print(f"Period:      {datetime.fromtimestamp(bars[0].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')} → {datetime.fromtimestamp(bars[-1].timestamp, tz=timezone.utc).strftime('%Y-%m-%d')}")
+        print(f"Bars:        {len(bars)} daily")
+        print(f"Trades:      {result.total_trades}")
+        print(f"Win rate:    {result.win_rate}%")
+        print(f"Total PnL:   {result.total_pnl_pct}%")
+        print(f"Prof factor: {result.profit_factor}")
+        print(f"Max DD:      {result.max_drawdown_pct}%")
+        print(f"Sharpe:      {result.sharpe}")
+        print(f"Flat months: {result.flat_months}")
 
-    if mode == "optimize":
-        log.info("Running optimizer...")
+    elif mode == "optimize_cg":
+        log.info("Fetching CoinGecko data for optimization...")
+        bars = fetch_coingecko_full_history("solana")
+        if not bars:
+            sys.exit(1)
+        log.info("Running optimizer on full history...")
         top = run_optimizer(bars, top_n=10)
+        print("\n=== TOP 10 PARAMS — FULL COINGECKO HISTORY ===")
+        for i, r in enumerate(top):
+            p = r.params
+            print(
+                f"{i+1:2d}. MACD({p['macd_fast']},{p['macd_slow']},{p['macd_signal']}) "
+                f"hist≥{p['min_hist_pips']} ADX({p['adx_period']},≥{p['adx_level']}) | "
+                f"PnL={r.total_pnl_pct:.1f}% WR={r.win_rate:.1f}% "
+                f"Sharpe={r.sharpe:.3f} DD={r.max_drawdown_pct:.1f}% "
+                f"Trades={r.total_trades} FlatMonths={r.flat_months}"
+            )
+
+    elif mode == "optimize":
+        log.info("Fetching Bybit data for optimization...")
+        bars = fetch_bybit_ohlcv("SOLUSDT", "60", days=365)
+        top  = run_optimizer(bars, top_n=10)
         print("\n=== TOP 10 PARAMETER SETS ===")
         for i, r in enumerate(top):
             p = r.params
@@ -329,7 +493,10 @@ if __name__ == "__main__":
                 f"Sharpe={r.sharpe:.3f} DD={r.max_drawdown_pct:.1f}% "
                 f"Trades={r.total_trades} FlatMonths={r.flat_months}"
             )
+
     else:
+        log.info("Fetching Bybit data...")
+        bars   = fetch_bybit_ohlcv("SOLUSDT", "60", days=365)
         params = StrategyParams()
         result = run_backtest(bars, params)
         print(f"\n=== BACKTEST RESULT ===")
@@ -337,8 +504,6 @@ if __name__ == "__main__":
         print(f"Trades:      {result.total_trades}")
         print(f"Win rate:    {result.win_rate}%")
         print(f"Total PnL:   {result.total_pnl_pct}%")
-        print(f"Avg win:     {result.avg_win_pct}%")
-        print(f"Avg loss:    {result.avg_loss_pct}%")
         print(f"Prof factor: {result.profit_factor}")
         print(f"Max DD:      {result.max_drawdown_pct}%")
         print(f"Sharpe:      {result.sharpe}")
