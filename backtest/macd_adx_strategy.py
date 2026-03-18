@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 import math
 
+TIMEFRAME = "15"  # default candle interval in minutes (used by bridge and backtester)
+
 
 # ── Parameters ─────────────────────────────────────────────────────────────────
 
