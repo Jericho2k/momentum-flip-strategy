@@ -167,9 +167,16 @@
   </div>
 
   <div>
-    <div class="section-title">Data</div>
+    <div class="section-title">Data source</div>
     <div class="param-group">
-      <div class="param-row"><label>History (days)</label><input type="number" id="days" value="365" min="30" max="730"></div>
+      <div class="param-row">
+        <label>Source</label>
+        <select id="data_source" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:var(--font);font-size:12px;">
+          <option value="bybit">Bybit (H1, ~1yr)</option>
+          <option value="coingecko">CoinGecko (daily, 2020+)</option>
+        </select>
+      </div>
+      <div class="param-row"><label>History (days)</label><input type="number" id="days" value="365" min="30" max="2000"></div>
     </div>
   </div>
 
@@ -441,13 +448,23 @@ function computeStats(trades) {
            flatMonths, cumPnl, monthly, avgWin:+avgWin.toFixed(4), avgLoss:+avgLoss.toFixed(4) };
 }
 
-// ── Bybit data fetch ──────────────────────────────────────────────────────────
+// ── Data fetch ────────────────────────────────────────────────────────────────
 
 async function fetchBars(days) {
+  const source = document.getElementById('data_source').value;
+
+  if (source === 'coingecko') {
+    return await fetchCoinGecko(days);
+  } else {
+    return await fetchBybit(days);
+  }
+}
+
+async function fetchBybit(days) {
   const limit=200, allBars=[];
   let endTs = Date.now();
   const target = days*24;
-  setStatus('Fetching Bybit data...', 'running');
+  setStatus('Fetching Bybit H1 data...', 'running');
   while (allBars.length < target) {
     const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=SOLUSDT&interval=60&limit=${limit}&end=${endTs}`;
     try {
@@ -459,13 +476,47 @@ async function fetchBars(days) {
       batch.sort((a,b)=>a.t-b.t);
       allBars.unshift(...batch);
       endTs = +list[list.length-1][0]-1;
-      setStatus(`Fetched ${allBars.length} bars...`, 'running');
+      setStatus(`Fetched ${allBars.length} Bybit bars...`, 'running');
       if (list.length < limit) break;
       await new Promise(r=>setTimeout(r,300));
-    } catch(e) { setStatus('Fetch error: '+e.message, 'error'); break; }
+    } catch(e) { setStatus('Bybit fetch error: '+e.message, 'error'); break; }
   }
   allBars.sort((a,b)=>a.t-b.t);
   return allBars;
+}
+
+async function fetchCoinGecko(days) {
+  setStatus('Fetching CoinGecko data (2020–present)...', 'running');
+  const url = `https://api.coingecko.com/api/v3/coins/solana/market_chart?vs_currency=usd&days=max&interval=daily`;
+  try {
+    const r   = await fetch(url);
+    const d   = await r.json();
+    const prices  = d.prices  || [];
+    const volumes = d.total_volumes || [];
+    const volMap  = {};
+    volumes.forEach(v => volMap[Math.floor(v[0]/1000)] = v[1]);
+
+    const bars = [];
+    for (let i=1; i<prices.length; i++) {
+      const ts    = Math.floor(prices[i][0] / 1000);
+      const close = prices[i][1];
+      const prev  = prices[i-1][1];
+      bars.push({
+        t: ts,
+        o: prev,
+        h: Math.max(close, prev) * 1.002,
+        l: Math.min(close, prev) * 0.998,
+        c: close,
+        v: volMap[ts] || 0,
+      });
+    }
+    bars.sort((a,b)=>a.t-b.t);
+    setStatus(`CoinGecko: ${bars.length} daily bars fetched`, 'running');
+    return bars;
+  } catch(e) {
+    setStatus('CoinGecko fetch error: '+e.message, 'error');
+    return [];
+  }
 }
 
 // ── Update UI ─────────────────────────────────────────────────────────────────
