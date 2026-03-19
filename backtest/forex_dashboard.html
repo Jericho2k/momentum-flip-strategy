@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SOL/USDT · MACD/ADX Backtester</title>
+<title>Forex · MACD/ADX Backtester</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <style>
   :root {
@@ -128,9 +128,9 @@
 <body>
 
 <header>
-  <h1>SOL/USDT · MACD/ADX Backtester</h1>
+  <h1>Forex · MACD/ADX Backtester</h1>
   <span class="dot"></span>
-  <span>Bybit perpetual · H1 · up to 365 days</span>
+  <span>OANDA practice · M15 · session-aware</span>
 </header>
 
 <div class="layout">
@@ -140,12 +140,12 @@
   <div>
     <div class="section-title">MACD parameters</div>
     <div class="param-group">
-      <div class="param-row"><label>Fast (Б)</label><input type="number" id="macd_fast" value="10" min="2" max="50"></div>
-      <div class="param-row"><label>Slow (М)</label><input type="number" id="macd_slow" value="28" min="5" max="100"></div>
-      <div class="param-row"><label>Signal (С)</label><input type="number" id="macd_signal" value="3" min="1" max="20"></div>
+      <div class="param-row"><label>Fast</label><input type="number" id="macd_fast" value="10" min="2" max="50"></div>
+      <div class="param-row"><label>Slow</label><input type="number" id="macd_slow" value="28" min="5" max="100"></div>
+      <div class="param-row"><label>Signal</label><input type="number" id="macd_signal" value="3" min="1" max="20"></div>
       <div class="param-row">
         <label>Min histogram %</label>
-        <input type="number" id="min_hist" value="0.0008" min="0.00001" max="0.01" step="0.0001"
+        <input type="number" id="min_hist" value="0.0003" min="0.00001" max="0.01" step="0.0001"
           style="width:72px" oninput="updateHistDisplay()">
       </div>
       <div style="font-size:10px;color:var(--muted);padding:2px 0 6px 0;display:flex;justify-content:space-between">
@@ -159,7 +159,7 @@
     <div class="section-title">ADX parameters</div>
     <div class="param-group">
       <div class="param-row"><label>Period</label><input type="number" id="adx_period" value="14" min="5" max="30"></div>
-      <div class="param-row"><label>Min level (Ур)</label><input type="number" id="adx_level" value="20" min="10" max="80"></div>
+      <div class="param-row"><label>Min level</label><input type="number" id="adx_level" value="25" min="10" max="80"></div>
     </div>
   </div>
 
@@ -184,8 +184,8 @@
   <div>
     <div class="section-title">Session / risk</div>
     <div class="param-group">
-      <div class="param-row"><label>Session start (UTC h)</label><input type="number" id="sess_start" value="10" min="0" max="23"></div>
-      <div class="param-row"><label>Session end (UTC h)</label><input type="number" id="sess_end" value="18" min="0" max="23"></div>
+      <div class="param-row"><label>Session start (UTC h)</label><input type="number" id="sess_start" value="7" min="0" max="23"></div>
+      <div class="param-row"><label>Session end (UTC h)</label><input type="number" id="sess_end" value="20" min="0" max="23"></div>
       <div class="param-row"><label>Morning stop</label><input type="checkbox" id="morning_stop" checked></div>
       <div class="param-row"><label>SL $ (0=off)</label><input type="number" id="sl_pips" value="0" min="0" step="0.5"></div>
       <div class="param-row"><label>Leverage</label><input type="number" id="leverage" value="3" min="1" max="5"></div>
@@ -198,21 +198,23 @@
       <div class="param-row">
         <label>Symbol</label>
         <select id="symbol" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:var(--font);font-size:12px;width:130px">
-          <option value="SOLUSDT">SOL/USDT</option>
-          <option value="AVAXUSDT">AVAX/USDT</option>
-          <option value="SUIUSDT">SUI/USDT</option>
+          <option value="EURUSD">EUR/USD</option>
+          <option value="GBPUSD">GBP/USD</option>
+          <option value="USDJPY">USD/JPY</option>
+          <option value="AUDUSD">AUD/USD</option>
+          <option value="USDCHF">USD/CHF</option>
         </select>
       </div>
       <div class="param-row">
         <label>Source</label>
-        <select id="data_source" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:var(--font);font-size:12px;width:72px">
-          <option value="bybit">Bybit (H1)</option>
-          <option value="binance">Binance (15m, 2021+)</option>
+        <select id="data_source" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:var(--font);font-size:12px;width:130px">
+          <option value="alphavantage">Alpha Vantage (M15, free)</option>
+          <option value="frankfurter">Frankfurter (daily, free)</option>
         </select>
       </div>
       <div class="param-row">
         <label>Start date</label>
-        <input type="date" id="start_date" value="2024-01-01" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:var(--font);font-size:11px;width:130px">
+        <input type="date" id="start_date" value="2022-01-01" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:var(--font);font-size:11px;width:130px">
       </div>
       <div class="param-row">
         <label>End date</label>
@@ -569,64 +571,105 @@ function computeStats(trades) {
 // ── Data fetch ────────────────────────────────────────────────────────────────
 
 async function fetchBars() {
-  const p = getParams();
+  const p      = getParams();
+  const symbol = document.getElementById('symbol').value;
+  const source = document.getElementById('data_source').value;
   const startMs = new Date(p.start_date).getTime();
   const endMs   = new Date(p.end_date).getTime();
 
-  if (p.data_source === 'binance') {
-    return await fetchBinance(startMs, endMs);
+  if (source === 'alphavantage') {
+    return await fetchAlphaVantage(symbol, startMs, endMs);
   } else {
-    return await fetchBybit(startMs, endMs);
+    return await fetchFrankfurter(symbol, startMs, endMs);
   }
 }
 
-async function fetchBybit(startMs, endMs) {
-  const limit = 200, allBars = [];
-  let endTs = endMs;
-  setStatus('Fetching Bybit H1 data...', 'running');
-  while (true) {
-    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=SOLUSDT&interval=60&limit=${limit}&end=${endTs}`;
-    try {
-      const r = await fetch(url);
-      const d = await r.json();
-      const list = d?.result?.list;
-      if (!list || !list.length) break;
-      const batch = list.map(c => ({t:Math.floor(+c[0]/1000),o:+c[1],h:+c[2],l:+c[3],c:+c[4],v:+c[5]}));
-      batch.sort((a,b) => a.t-b.t);
-      const filtered = batch.filter(b => b.t*1000 >= startMs);
-      allBars.unshift(...filtered);
-      endTs = +list[list.length-1][0] - 1;
-      setStatus(`Fetched ${allBars.length} Bybit bars...`, 'running');
-      if (list.length < limit || +list[list.length-1][0] <= startMs) break;
-      await new Promise(r => setTimeout(r, 300));
-    } catch(e) { setStatus('Bybit error: '+e.message, 'error'); break; }
+async function fetchAlphaVantage(symbol, startMs, endMs) {
+  const AV_KEY = 'demo'; // replace with free key from alphavantage.co
+  setStatus('Fetching Alpha Vantage forex data...', 'running');
+
+  const from = symbol.slice(0, 3);
+  const to   = symbol.slice(3, 6);
+  const url  = `https://www.alphavantage.co/query?function=FX_INTRADAY&from_symbol=${from}&to_symbol=${to}&interval=15min&outputsize=full&apikey=${AV_KEY}`;
+
+  try {
+    const r    = await fetch(url);
+    const data = await r.json();
+    const ts   = data['Time Series FX (15min)'];
+
+    if (!ts) {
+      setStatus('Alpha Vantage error: ' + JSON.stringify(data).slice(0, 120), 'error');
+      return [];
+    }
+
+    const bars = Object.entries(ts)
+      .map(([time, v]) => ({
+        t: Math.floor(new Date(time + ' UTC').getTime() / 1000),
+        o: +v['1. open'],
+        h: +v['2. high'],
+        l: +v['3. low'],
+        c: +v['4. close'],
+        v: 0,
+      }))
+      .filter(b => b.t * 1000 >= startMs && b.t * 1000 <= endMs)
+      .sort((a, b) => a.t - b.t);
+
+    setStatus(`Fetched ${bars.length} M15 bars for ${symbol}`, 'running');
+    return bars;
+  } catch(e) {
+    setStatus('Alpha Vantage error: ' + e.message, 'error');
+    return [];
   }
-  allBars.sort((a,b) => a.t-b.t);
-  return allBars;
 }
 
-async function fetchBinance(startMs, endMs) {
-  setStatus('Fetching Binance 15m data — this may take a minute...', 'running');
-  const allBars = [];
-  let startTime = startMs;
-  while (true) {
-    const symbol = document.getElementById('symbol').value;
-    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=15m&startTime=${startTime}&endTime=${endMs}&limit=1000`;
-    try {
-      const r   = await fetch(url);
-      const raw = await r.json();
-      if (!raw || !raw.length) break;
-      raw.forEach(c => allBars.push({
-        t:Math.floor(+c[0]/1000), o:+c[1], h:+c[2], l:+c[3], c:+c[4], v:+c[5]
-      }));
-      setStatus(`Fetched ${allBars.length} Binance bars...`, 'running');
-      if (raw.length < 1000) break;
-      startTime = +raw[raw.length-1][0] + 1;
-      await new Promise(r => setTimeout(r, 150));
-    } catch(e) { setStatus('Binance error: '+e.message, 'error'); break; }
+async function fetchFrankfurter(symbol, startMs, endMs) {
+  setStatus('Fetching Frankfurter daily data...', 'running');
+
+  const from = document.getElementById('start_date').value;
+  const to   = document.getElementById('end_date').value;
+
+  const symbolMap = {
+    'EURUSD': { base: 'EUR', quote: 'USD' },
+    'GBPUSD': { base: 'GBP', quote: 'USD' },
+    'USDJPY': { base: 'USD', quote: 'JPY' },
+    'AUDUSD': { base: 'AUD', quote: 'USD' },
+    'USDCHF': { base: 'USD', quote: 'CHF' },
+  };
+
+  const pair = symbolMap[symbol];
+  if (!pair) { setStatus('Pair not supported by Frankfurter', 'error'); return []; }
+
+  try {
+    const url = `https://api.frankfurter.app/${from}..${to}?from=${pair.base}&to=${pair.quote}`;
+    const r   = await fetch(url);
+    const d   = await r.json();
+
+    const rates = d.rates || {};
+    const bars  = [];
+    const dates = Object.keys(rates).sort();
+
+    for (let i = 1; i < dates.length; i++) {
+      const ts    = Math.floor(new Date(dates[i] + 'T12:00:00Z').getTime() / 1000);
+      const close = rates[dates[i]][pair.quote];
+      const prev  = rates[dates[i-1]][pair.quote];
+      if (!close || !prev) continue;
+      bars.push({
+        t: ts,
+        o: prev,
+        h: Math.max(close, prev) * 1.0005,
+        l: Math.min(close, prev) * 0.9995,
+        c: close,
+        v: 0,
+      });
+    }
+
+    bars.sort((a, b) => a.t - b.t);
+    setStatus(`Fetched ${bars.length} daily bars for ${symbol}`, 'running');
+    return bars;
+  } catch(e) {
+    setStatus('Frankfurter error: ' + e.message, 'error');
+    return [];
   }
-  allBars.sort((a,b) => a.t-b.t);
-  return allBars;
 }
 
 // ── Update UI ─────────────────────────────────────────────────────────────────
@@ -906,8 +949,8 @@ async function runOptimizer() {
     macd_fast:    [8, 10, 12],
     macd_slow:    [21, 26, 28],
     macd_signal:  [3, 5, 9],
-    min_hist_pct: [0.0003, 0.0008, 0.0015],  // 0.03%, 0.08%, 0.15% of price
-    adx_level:    [20, 25, 30],
+    min_hist_pct: [0.0001, 0.0003, 0.0008],  // tighter for forex
+    adx_level:    [20, 25, 30, 45],           // include uncle's original 45
   };
 
   const keys=Object.keys(grid), vals=Object.values(grid);
@@ -1018,7 +1061,7 @@ function applyParams(p) {
 }
 
 // ── Profiles — persistent via localStorage ────────────────────────────────────
-const STORAGE_KEY = 'sol_backtester_profiles';
+const STORAGE_KEY = 'forex_backtester_profiles';
 
 function loadProfiles() {
   try {
