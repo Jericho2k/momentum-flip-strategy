@@ -16,6 +16,7 @@ Logic summary:
 from dataclasses import dataclass, field
 from typing import Optional
 import math
+from datetime import datetime, timezone
 
 TIMEFRAME = "15"  # default candle interval in minutes (used by bridge and backtester)
 
@@ -24,29 +25,25 @@ TIMEFRAME = "15"  # default candle interval in minutes (used by bridge and backt
 
 @dataclass
 class StrategyParams:
-    # MACD
-    macd_fast:     int   = 12
-    macd_slow:     int   = 28
-    macd_signal:   int   = 5
-    min_hist_pct:  float = 0.0008  # minimum histogram as % of price (e.g. 0.08%)
-
-    # ADX
-    adx_period: int   = 14
-    adx_level:  float = 20.0    # only trade when ADX >= this
-
-    # Session filter (UTC hours, set None to disable)
-    session_start: Optional[int] = None
-    session_end:   Optional[int] = None
-    morning_stop:  bool = False
-
-    # Risk
-    sl_pips:  float = 0.0          # hard stop in price units (0 = disabled)
-    leverage: int   = 2
-
-    # Regime filter — higher timeframe ADX
+    macd_fast:         int   = 8
+    macd_slow:         int   = 28
+    macd_signal:       int   = 3
+    min_hist_pct:      float = 0.0001
+    adx_period:        int   = 14
+    adx_level:         float = 20.0
+    session_start:     Optional[int] = 7
+    session_end:       Optional[int] = 20
+    morning_stop:      bool  = True
+    sl_pips:           float = 0.0
+    leverage:          int   = 2
     regime_adx_period: int   = 14
-    regime_adx_level:  float = 20.0   # daily ADX must be above this to trade
-    regime_enabled:    bool  = True
+    regime_adx_level:  float = 20.0
+    regime_enabled:    bool  = False
+
+    # ── New filters ──────────────────────────────────────────────────────────
+    min_hold_bars:     int   = 16          # don't flip before this many bars
+    kill_hours:        tuple = (16, 17, 18)  # UTC hours to never enter
+    skip_monday:       bool  = True          # skip Monday entries
 
 
 # ── Indicator calculations ─────────────────────────────────────────────────────
@@ -223,9 +220,10 @@ def generate_signals(
         valid = [v for k, v in regime_adx_map.items() if k <= ts]
         return valid[-1] if valid else 0.0
 
-    signals   = []
-    position  = None   # None, 'LONG', 'SHORT'
-    warmup    = max(params.macd_slow + params.macd_signal, params.adx_period * 2) + 5
+    signals       = []
+    position      = None   # None, 'LONG', 'SHORT'
+    pos_entry_bar = 0      # bar index when current position was entered
+    warmup        = max(params.macd_slow + params.macd_signal, params.adx_period * 2) + 5
 
     for i in range(warmup, len(bars)):
         bar      = bars[i]
@@ -238,34 +236,52 @@ def generate_signals(
             continue
 
         price = bar.close
+        dt    = datetime.fromtimestamp(bar.timestamp, tz=timezone.utc)
+        hour  = dt.hour
+        dow   = dt.weekday()  # 0=Monday
 
-        # Morning stop — close/reverse at session open
+        # Morning stop — reverse at session open
         if params.morning_stop and is_session_open(bar.timestamp, prev_bar.timestamp, params):
             if position is not None:
                 new_pos = 'SHORT' if position == 'LONG' else 'LONG'
                 signals.append(Signal(i, bar.timestamp, new_pos, price,
                                       "morning_stop_reverse", h_now, adx_now))
                 position = new_pos
+                pos_entry_bar = i
             continue
 
-        # Only trade in session
+        # Session end — close position
         if not in_session(bar.timestamp, params):
             if position is not None:
                 signals.append(Signal(i, bar.timestamp, 'CLOSE', price,
                                       "session_end", h_now, adx_now))
                 position = None
+                pos_entry_bar = 0
             continue
 
-        # 15m ADX filter
+        # ── Kill hours filter ─────────────────────────────────────────────
+        if params.kill_hours and hour in params.kill_hours:
+            if position is not None:
+                signals.append(Signal(i, bar.timestamp, 'CLOSE', price,
+                                      "kill_hour", h_now, adx_now))
+                position = None
+                pos_entry_bar = 0
+            continue
+
+        # ── Skip Monday entries (hold existing positions) ─────────────────
+        if params.skip_monday and dow == 0:
+            continue
+
+        # ADX filter
         if adx_now < params.adx_level:
             continue
 
-        # Histogram filter — relative to price so it scales across symbols
+        # Histogram filter
         min_hist_abs = price * params.min_hist_pct
         if abs(h_now) < min_hist_abs:
             continue
 
-        # ── Regime filter ──────────────────────────────────────────
+        # Regime filter
         if params.regime_enabled:
             regime_adx = get_regime_adx(bar.timestamp)
             if regime_adx < params.regime_adx_level:
@@ -273,21 +289,30 @@ def generate_signals(
                     signals.append(Signal(i, bar.timestamp, 'CLOSE', price,
                                           "regime_filter", h_now, adx_now))
                     position = None
+                    pos_entry_bar = 0
                 continue
-        # ──────────────────────────────────────────────────────────
 
         # MACD histogram crossover
         cross_up   = h_prev <= 0 and h_now > 0
         cross_down = h_prev >= 0 and h_now < 0
 
         if cross_up and position != 'LONG':
+            # ── Min hold bars: don't flip too soon ───────────────────────
+            bars_held = i - pos_entry_bar
+            if position is not None and bars_held < params.min_hold_bars:
+                continue
             signals.append(Signal(i, bar.timestamp, 'LONG', price,
                                   "macd_hist_cross_up", h_now, adx_now))
             position = 'LONG'
+            pos_entry_bar = i
 
         elif cross_down and position != 'SHORT':
+            bars_held = i - pos_entry_bar
+            if position is not None and bars_held < params.min_hold_bars:
+                continue
             signals.append(Signal(i, bar.timestamp, 'SHORT', price,
                                   "macd_hist_cross_down", h_now, adx_now))
             position = 'SHORT'
+            pos_entry_bar = i
 
     return signals

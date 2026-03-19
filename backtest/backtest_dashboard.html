@@ -108,6 +108,10 @@
   td { padding: 5px 8px; border-bottom: 1px solid rgba(255,255,255,.03); }
   tr:hover td { background: rgba(255,255,255,.02); }
   .long { color: var(--green); } .short { color: var(--red); }
+  .sortable { cursor: pointer; user-select: none; color: var(--muted); }
+  .sortable:hover { color: var(--text); }
+  .sortable.sort-asc::after  { content: ' ▲'; color: var(--blue); }
+  .sortable.sort-desc::after { content: ' ▼'; color: var(--blue); }
 
   .opt-results { background: var(--card); border-radius: 8px; padding: 14px; }
   .opt-row { display: flex; justify-content: space-between; align-items: center; padding: 7px 10px; border-radius: 5px; cursor: pointer; margin-bottom: 3px; }
@@ -187,6 +191,21 @@
       <div class="param-row"><label>Session start (UTC h)</label><input type="number" id="sess_start" value="10" min="0" max="23"></div>
       <div class="param-row"><label>Session end (UTC h)</label><input type="number" id="sess_end" value="18" min="0" max="23"></div>
       <div class="param-row"><label>Morning stop</label><input type="checkbox" id="morning_stop" checked></div>
+      <div class="param-row">
+        <label>Min hold bars</label>
+        <input type="number" id="min_hold_bars" value="16" min="0" max="200" step="1">
+      </div>
+      <div class="param-row">
+        <label>Skip Monday</label>
+        <input type="checkbox" id="skip_monday" checked>
+      </div>
+      <div class="param-row">
+        <label>Kill hours (UTC)</label>
+        <input type="text" id="kill_hours" value="16,17,18" placeholder="e.g. 16,17,18"
+          style="width:72px;font-size:11px;padding:4px 6px;background:var(--bg);
+          border:1px solid var(--border);color:var(--text);border-radius:4px;
+          font-family:var(--font-mono)">
+      </div>
       <div class="param-row"><label>SL $ (0=off)</label><input type="number" id="sl_pips" value="0" min="0" step="0.5"></div>
       <div class="param-row"><label>Leverage</label><input type="number" id="leverage" value="3" min="1" max="5"></div>
     </div>
@@ -228,6 +247,7 @@
     <div class="section-title">Saved profiles</div>
     <div class="profile-list" id="profileList"></div>
     <button class="save-btn" onclick="saveProfile()" style="margin-top:6px">+ Save current result</button>
+    <button class="save-btn" onclick="exportBacktestData()" style="margin-top:6px">&#8595; Export full data (JSON)</button>
   </div>
 
   <div class="status-bar" id="status">Ready.</div>
@@ -267,13 +287,22 @@
 
   <!-- Trade table -->
   <div class="chart-card">
-    <div class="chart-title">Recent trades (last 30)</div>
-    <div style="max-height:220px;overflow-y:auto">
+    <div class="chart-title">All trades</div>
+    <div style="max-height:400px;overflow-y:auto">
       <table id="tradeTable">
-        <thead><tr>
-          <th>#</th><th>Entry</th><th>Exit</th><th>Dir</th>
-          <th>Entry $</th><th>Exit $</th><th>PnL %</th><th>Bars</th><th>Reason</th>
-        </tr></thead>
+        <thead>
+          <tr id="tradeHeader">
+            <th style="cursor:default">#</th>
+            <th onclick="sortTable('entryTs')"    class="sortable">Entry ↕</th>
+            <th onclick="sortTable('exitTs')"     class="sortable">Exit ↕</th>
+            <th onclick="sortTable('dir')"        class="sortable">Dir ↕</th>
+            <th onclick="sortTable('entryPrice')" class="sortable">Entry $ ↕</th>
+            <th onclick="sortTable('exitPrice')"  class="sortable">Exit $ ↕</th>
+            <th onclick="sortTable('pnl')"        class="sortable">PnL % ↕</th>
+            <th onclick="sortTable('bars')"       class="sortable">Bars ↕</th>
+            <th style="cursor:default">Reason</th>
+          </tr>
+        </thead>
         <tbody id="tradeBody"></tbody>
       </table>
     </div>
@@ -329,13 +358,19 @@ function updateHistDisplay() {
 document.getElementById('end_date').value = new Date().toISOString().split('T')[0];
 
 function getParams() {
+  const killHoursRaw = document.getElementById('kill_hours')?.value || '';
+  const killHours = killHoursRaw
+    .split(',')
+    .map(s => parseInt(s.trim()))
+    .filter(n => !isNaN(n));
+
   return {
-    macd_fast:     +document.getElementById('macd_fast').value,
-    macd_slow:     +document.getElementById('macd_slow').value,
-    macd_signal:   +document.getElementById('macd_signal').value,
-    min_hist_pct:  +document.getElementById('min_hist').value,
-    adx_period:    +document.getElementById('adx_period').value,
-    adx_level:     +document.getElementById('adx_level').value,
+    macd_fast:         +document.getElementById('macd_fast').value,
+    macd_slow:         +document.getElementById('macd_slow').value,
+    macd_signal:       +document.getElementById('macd_signal').value,
+    min_hist_pct:      +document.getElementById('min_hist').value,
+    adx_period:        +document.getElementById('adx_period').value,
+    adx_level:         +document.getElementById('adx_level').value,
     session_start:     +document.getElementById('sess_start').value,
     session_end:       +document.getElementById('sess_end').value,
     morning_stop:      document.getElementById('morning_stop').checked,
@@ -348,6 +383,10 @@ function getParams() {
     data_source:       document.getElementById('data_source').value,
     start_date:        document.getElementById('start_date').value,
     end_date:          document.getElementById('end_date').value,
+    // New filters
+    min_hold_bars:     +document.getElementById('min_hold_bars').value,
+    skip_monday:       document.getElementById('skip_monday').checked,
+    kill_hours:        killHours,
   };
 }
 
@@ -489,13 +528,28 @@ function runSimulation(bars, p) {
       if (pos) {
         const newDir = pos.dir==='LONG'?'SHORT':'LONG';
         closeTrade(bar.c, bar.t, 'morning_reverse', i);
-        pos = {dir:newDir, price:bar.c, entryTs:bar.t, entryIdx:i};
+        pos = {dir:newDir, price:bar.c, entryTs:bar.t, entryIdx:i, _entryIdx:i};
       }
       continue;
     }
 
     // Session end
     if (!inSession(bar.t)) { dbgSession++; if(pos) closeTrade(bar.c,bar.t,'session_end',i); continue; }
+
+    // Kill hours filter
+    if (p.kill_hours && p.kill_hours.length > 0) {
+      const h = new Date(bar.t * 1000).getUTCHours();
+      if (p.kill_hours.includes(h)) {
+        if (pos) { closeTrade(bar.c, bar.t, 'kill_hour', i); }
+        continue;
+      }
+    }
+
+    // Skip Monday entries (hold existing positions)
+    if (p.skip_monday) {
+      const dow = new Date(bar.t * 1000).getUTCDay(); // 0=Sunday, 1=Monday
+      if (dow === 1) continue;
+    }
 
     // ADX filter
     if (adxV < p.adx_level) { dbgADX++; continue; }
@@ -517,12 +571,18 @@ function runSimulation(bars, p) {
     const crossDown = hp>=0 && h<0;
     if (crossUp||crossDown) dbgCross++;
 
+    // Min hold bars: don't flip too soon
+    const barsHeld = pos ? (i - (pos._entryIdx || 0)) : 0;
+    const tooSoon  = pos && barsHeld < (p.min_hold_bars || 0);
+
     if (crossUp && (!pos||pos.dir!=='LONG')) {
+      if (tooSoon) continue;
       if (pos) closeTrade(bar.c, bar.t, 'flip', i);
-      pos = {dir:'LONG', price:bar.c, entryTs:bar.t, entryIdx:i};
+      pos = {dir:'LONG', price:bar.c, entryTs:bar.t, entryIdx:i, _entryIdx:i};
     } else if (crossDown && (!pos||pos.dir!=='SHORT')) {
+      if (tooSoon) continue;
       if (pos) closeTrade(bar.c, bar.t, 'flip', i);
-      pos = {dir:'SHORT', price:bar.c, entryTs:bar.t, entryIdx:i};
+      pos = {dir:'SHORT', price:bar.c, entryTs:bar.t, entryIdx:i, _entryIdx:i};
     }
   }
 
@@ -721,19 +781,19 @@ function updatePriceChart(bars, trades) {
         {
           label: 'Long entry', data: entryLong.map(p => ({ x: p.x, y: p.y })),
           borderColor: '#1D9E75', backgroundColor: '#1D9E75',
-          pointStyle: 'triangle', pointRadius: 8, pointHoverRadius: 12,
+          pointStyle: 'triangle', pointRadius: entryLong.map(() => 8), pointHoverRadius: 12,
           showLine: false, order: 1, tradeData: entryLong,
         },
         {
           label: 'Short entry', data: entryShort.map(p => ({ x: p.x, y: p.y })),
           borderColor: '#f05c5c', backgroundColor: '#f05c5c',
-          pointStyle: 'triangle', pointRadius: 8, pointHoverRadius: 12, rotation: 180,
+          pointStyle: 'triangle', pointRadius: entryShort.map(() => 8), pointHoverRadius: 12, rotation: 180,
           showLine: false, order: 1, tradeData: entryShort,
         },
         {
           label: 'Exit', data: exitPoints.map(p => ({ x: p.x, y: p.y })),
           borderColor: '#f5a623', backgroundColor: 'rgba(245,166,35,0.15)',
-          pointStyle: 'circle', pointRadius: 6, pointHoverRadius: 10,
+          pointStyle: 'circle', pointRadius: exitPoints.map(() => 6), pointHoverRadius: 10,
           showLine: false, order: 1, tradeData: exitPoints,
         },
       ]
@@ -822,25 +882,144 @@ function updateCharts(s) {
   });
 }
 
+let allTrades = [];
+let currentSortCol = null;
+let currentSortDir = 0; // 0=original 1=desc 2=asc
+let highlightTimeout = null;
+
 function updateTable(trades) {
+  allTrades = [...trades];
+  renderTable(allTrades, null);
+}
+
+function renderTable(trades, highlightIdx) {
   const tbody = document.getElementById('tradeBody');
   tbody.innerHTML = '';
-  const recent = trades.slice(-30).reverse();
-  recent.forEach((t,i)=>{
+
+  trades.forEach((t, i) => {
     const tr = document.createElement('tr');
+    tr.style.cssText = 'cursor:pointer;transition:background 0.2s';
+    tr.dataset.idx = i;
+
+    const isHighlighted = highlightIdx === i;
+    if (isHighlighted) {
+      tr.style.background = t.dir === 'LONG'
+        ? 'rgba(29,158,117,0.18)'
+        : 'rgba(240,92,92,0.18)';
+    }
+
     tr.innerHTML = `
-      <td>${trades.length-i}</td>
+      <td>${allTrades.indexOf(t) + 1}</td>
       <td>${fmtDate(t.entryTs)}</td>
       <td>${fmtDate(t.exitTs)}</td>
       <td class="${t.dir==='LONG'?'long':'short'}">${t.dir}</td>
-      <td>$${t.entryPrice.toFixed(3)}</td>
-      <td>$${t.exitPrice.toFixed(3)}</td>
+      <td>$${t.entryPrice.toFixed(5)}</td>
+      <td>$${t.exitPrice.toFixed(5)}</td>
       <td class="${t.pnl>=0?'long':'short'}">${t.pnl>=0?'+':''}${t.pnl}%</td>
       <td>${t.bars}</td>
       <td style="color:#7a7f96">${t.reason}</td>
     `;
+
+    tr.addEventListener('click', () => highlightTrade(t, i));
+    tr.addEventListener('mouseenter', () => { if (!isHighlighted) tr.style.background = 'rgba(255,255,255,0.03)'; });
+    tr.addEventListener('mouseleave', () => { if (!isHighlighted) tr.style.background = ''; });
+
     tbody.appendChild(tr);
   });
+}
+
+function sortTable(col) {
+  if (currentSortCol === col) {
+    currentSortDir = (currentSortDir + 1) % 3;
+  } else {
+    currentSortCol = col;
+    currentSortDir = 1;
+  }
+
+  document.querySelectorAll('.sortable').forEach(th => {
+    th.classList.remove('sort-asc', 'sort-desc');
+    th.textContent = th.textContent.replace(/ [▲▼]$/, '').trim() + ' ↕';
+  });
+
+  let sorted;
+  if (currentSortDir === 0) {
+    sorted = [...allTrades];
+    currentSortCol = null;
+  } else {
+    sorted = [...allTrades].sort((a, b) => {
+      let av = a[col], bv = b[col];
+      if (typeof av === 'string') av = av.toLowerCase();
+      if (typeof bv === 'string') bv = bv.toLowerCase();
+      if (av < bv) return currentSortDir === 1 ? 1 : -1;
+      if (av > bv) return currentSortDir === 1 ? -1 : 1;
+      return 0;
+    });
+
+    const colOrder = ['entryTs', 'exitTs', 'dir', 'entryPrice', 'exitPrice', 'pnl', 'bars'];
+    const thList = document.querySelectorAll('.sortable');
+    const idx = colOrder.indexOf(col);
+    if (idx >= 0 && thList[idx]) {
+      thList[idx].classList.add(currentSortDir === 1 ? 'sort-desc' : 'sort-asc');
+    }
+  }
+
+  renderTable(sorted, null);
+}
+
+function highlightTrade(trade, tableIdx) {
+  if (highlightTimeout) clearTimeout(highlightTimeout);
+
+  document.querySelectorAll('#tradeBody tr').forEach(tr => { tr.style.background = ''; });
+  const rows = document.querySelectorAll('#tradeBody tr');
+  const clickedRow = [...rows].find(r => +r.dataset.idx === tableIdx);
+  if (clickedRow) {
+    clickedRow.style.background = trade.dir === 'LONG'
+      ? 'rgba(29,158,117,0.25)'
+      : 'rgba(240,92,92,0.25)';
+  }
+
+  if (!priceChartInst) return;
+
+  const datasets = priceChartInst.data.datasets;
+  let foundDatasetIdx = -1, foundPointIdx = -1;
+
+  for (let di = 1; di < datasets.length; di++) {
+    const td = datasets[di].tradeData;
+    if (!td) continue;
+    for (let pi = 0; pi < td.length; pi++) {
+      if (td[pi].trade === trade || (
+        td[pi].trade.entryTs === trade.entryTs &&
+        td[pi].trade.entryPrice === trade.entryPrice
+      )) {
+        foundDatasetIdx = di;
+        foundPointIdx   = pi;
+        break;
+      }
+    }
+    if (foundDatasetIdx >= 0) break;
+  }
+
+  if (foundDatasetIdx >= 0) {
+    const origRadius = datasets[foundDatasetIdx].pointRadius;
+    datasets[foundDatasetIdx].pointRadius = Array.isArray(origRadius)
+      ? origRadius.map((r, i) => i === foundPointIdx ? 18 : r)
+      : origRadius;
+    showTradeModal(trade, { clientX: window.innerWidth / 2, clientY: 200 });
+    priceChartInst.update('none');
+
+    highlightTimeout = setTimeout(() => {
+      datasets[foundDatasetIdx].pointRadius = origRadius;
+      priceChartInst.update('none');
+      hideModal();
+      if (clickedRow) clickedRow.style.background = '';
+    }, 3000);
+  } else {
+    showTradeModal(trade, { clientX: window.innerWidth / 2, clientY: 300 });
+    highlightTimeout = setTimeout(() => {
+      hideModal();
+      if (clickedRow) clickedRow.style.background = '';
+    }, 3000);
+  }
 }
 
 // ── Run backtest ──────────────────────────────────────────────────────────────
@@ -906,8 +1085,9 @@ async function runOptimizer() {
     macd_fast:    [8, 10, 12],
     macd_slow:    [21, 26, 28],
     macd_signal:  [3, 5, 9],
-    min_hist_pct: [0.0003, 0.0008, 0.0015],  // 0.03%, 0.08%, 0.15% of price
+    min_hist_pct: [0.0001, 0.0003, 0.0008],
     adx_level:    [20, 25, 30],
+    // min_hold_bars tested via manual runs, not optimizer (too slow)
   };
 
   const keys=Object.keys(grid), vals=Object.values(grid);
@@ -1014,6 +1194,10 @@ function applyParams(p) {
   if (p.data_source)                    document.getElementById('data_source').value        = p.data_source;
   if (p.start_date)                     document.getElementById('start_date').value         = p.start_date;
   if (p.end_date)                       document.getElementById('end_date').value           = p.end_date;
+  if (p.min_hold_bars !== undefined)    document.getElementById('min_hold_bars').value      = p.min_hold_bars;
+  if (p.skip_monday   !== undefined)    document.getElementById('skip_monday').checked      = p.skip_monday;
+  if (p.kill_hours !== undefined && Array.isArray(p.kill_hours))
+    document.getElementById('kill_hours').value = p.kill_hours.join(',');
   setStatus('Params loaded — hit Run Backtest to confirm', 'done');
 }
 
@@ -1036,6 +1220,31 @@ function saveProfilesToStorage(profiles) {
 }
 
 let profiles = loadProfiles();
+
+function exportBacktestData() {
+  if (!lastResult) { setStatus('Run a backtest first', 'error'); return; }
+
+  const p = getParams();
+  const exportData = {
+    exported_at:  new Date().toISOString(),
+    symbol:       document.getElementById('symbol')?.value || 'SOLUSDT',
+    source:       p.data_source,
+    start_date:   p.start_date,
+    end_date:     p.end_date,
+    params:       p,
+    stats:        lastResult.stats,
+    trades:       lastResult.trades,
+  };
+
+  const blob = new Blob([JSON.stringify(exportData, null, 2)], {type: 'application/json'});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `backtest_${exportData.symbol}_${p.start_date}_${p.end_date}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  setStatus('Exported backtest data', 'done');
+}
 
 function saveProfile() {
   if (!lastResult) { setStatus('Run a backtest first', 'error'); return; }
@@ -1180,6 +1389,10 @@ function loadProfile(id) {
   if (p.data_source) document.getElementById('data_source').value = p.data_source;
   if (p.start_date)  document.getElementById('start_date').value  = p.start_date;
   if (p.end_date)    document.getElementById('end_date').value    = p.end_date;
+  if (p.min_hold_bars !== undefined)    document.getElementById('min_hold_bars').value      = p.min_hold_bars;
+  if (p.skip_monday   !== undefined)    document.getElementById('skip_monday').checked      = p.skip_monday;
+  if (p.kill_hours !== undefined && Array.isArray(p.kill_hours))
+    document.getElementById('kill_hours').value = p.kill_hours.join(',');
 
   setStatus(`Profile loaded — hit Run Backtest to re-run`, 'done');
 }
