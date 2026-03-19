@@ -210,7 +210,15 @@
         <select id="data_source" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:var(--font);font-size:12px;width:130px">
           <option value="alphavantage">Alpha Vantage (M15, free)</option>
           <option value="frankfurter">Frankfurter (daily, free)</option>
+          <option value="local">Local cache (Dukascopy M15)</option>
         </select>
+      </div>
+      <div class="param-row" style="margin-top:6px">
+        <label>AV API key</label>
+        <input type="text" id="av_key" placeholder="paste key here"
+          style="width:130px;font-size:10px;padding:4px 6px;background:var(--bg);
+          border:1px solid var(--border);color:var(--text);border-radius:4px;
+          font-family:var(--font)">
       </div>
       <div class="param-row">
         <label>Start date</label>
@@ -579,13 +587,15 @@ async function fetchBars() {
 
   if (source === 'alphavantage') {
     return await fetchAlphaVantage(symbol, startMs, endMs);
+  } else if (source === 'local') {
+    return await fetchLocal(symbol, startMs, endMs);
   } else {
     return await fetchFrankfurter(symbol, startMs, endMs);
   }
 }
 
 async function fetchAlphaVantage(symbol, startMs, endMs) {
-  const AV_KEY = 'demo'; // replace with free key from alphavantage.co
+  const AV_KEY = document.getElementById('av_key')?.value?.trim() || 'demo';
   setStatus('Fetching Alpha Vantage forex data...', 'running');
 
   const from = symbol.slice(0, 3);
@@ -668,6 +678,26 @@ async function fetchFrankfurter(symbol, startMs, endMs) {
     return bars;
   } catch(e) {
     setStatus('Frankfurter error: ' + e.message, 'error');
+    return [];
+  }
+}
+
+async function fetchLocal(symbol, startMs, endMs) {
+  const filename = symbol + '_M15.json';
+  setStatus('Loading local Dukascopy data: ' + filename, 'running');
+  try {
+    const r    = await fetch('data/' + filename);
+    const d    = await r.json();
+    const bars = (d.bars || [])
+      .filter(b => b.t * 1000 >= startMs && b.t * 1000 <= endMs);
+    bars.sort((a, b) => a.t - b.t);
+    setStatus(`Loaded ${bars.length} M15 bars from local cache`, 'running');
+    return bars;
+  } catch(e) {
+    setStatus(
+      'Local file not found. Run: python backtest/fetch_dukascopy.py --pair ' + symbol + ' --start 2022-01-01',
+      'error'
+    );
     return [];
   }
 }
