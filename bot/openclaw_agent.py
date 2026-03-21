@@ -41,7 +41,6 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes
 )
-from telegram.request import HTTPXRequest
 
 logging.basicConfig(
     level=logging.INFO,
@@ -570,6 +569,7 @@ def main():
     log.info("🤖 OpenClaw v2 starting...")
 
     if PROXY:
+        from telegram.request import HTTPXRequest
         request = HTTPXRequest(proxy=PROXY)
         builder = Application.builder().token(TELEGRAM_TOKEN).request(request)
     else:
