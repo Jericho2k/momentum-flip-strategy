@@ -4,3 +4,4 @@ httpx
 requests
 python-dotenv
 oandapyV20
+aiohttp-socks

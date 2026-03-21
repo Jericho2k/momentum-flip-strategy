@@ -41,6 +41,9 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes
 )
+from telegram.request import AiohttpRequest
+from aiohttp_socks import ProxyConnector
+import aiohttp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -569,9 +572,10 @@ def main():
     log.info("🤖 OpenClaw v2 starting...")
 
     if PROXY:
-        from telegram.request import HTTPXRequest
-        request = HTTPXRequest(proxy=PROXY)
-        builder = Application.builder().token(TELEGRAM_TOKEN).request(request)
+        connector = ProxyConnector.from_url(PROXY)
+        session   = aiohttp.ClientSession(connector=connector)
+        request   = AiohttpRequest(aiohttp_session=session)
+        builder   = Application.builder().token(TELEGRAM_TOKEN).request(request)
     else:
         builder = Application.builder().token(TELEGRAM_TOKEN)
     app = builder.build()
