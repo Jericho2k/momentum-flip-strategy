@@ -432,6 +432,12 @@ def run():
     tick = 0
 
     while True:
+        # Check for pause signal from Telegram
+        if Path(".bridge_paused").exists():
+            log.info("⏸ Bridge paused via Telegram — skipping tick")
+            time.sleep(LOOP_INTERVAL)
+            continue
+
         try:
             tick += 1
             now = datetime.now(timezone.utc)

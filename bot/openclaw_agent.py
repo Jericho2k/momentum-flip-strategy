@@ -1,288 +1,594 @@
 """
-OpenClaw Oversight Agent — SOL/USDT Strategy
-============================================
-Runs alongside the Bybit bridge as an intelligent overseer.
-Monitors the strategy, generates reports, surfaces observations,
-and suggests parameter adjustments — but never touches execution.
+OpenClaw v2 — Full Trading Control Agent
+==========================================
+Telegram bot with complete visibility and control over the crypto bridge.
 
-Usage:
-    python openclaw_agent.py
-
-OpenClaw is used here as a conversational agent loop:
-  - You can chat with it in natural language
-  - It reads the shared trade log and market state
-  - It proactively generates reports on a schedule
-  - It never calls place_order or modifies the bridge config directly
+Commands:
+  /status     — bridge health, uptime, current positions
+  /positions  — all open positions with unrealized PnL
+  /trades     — recent trade history with stats
+  /pnl        — P&L breakdown: today, this week, total
+  /report     — AI-generated strategy analysis (Claude)
+  /pause      — pause new entries (keep existing positions)
+  /resume     — resume new entries
+  /closeall   — close all open positions immediately
+  /close BTC  — close specific pair position
+  /risk       — current risk exposure per pair
+  /params     — show strategy parameters
+  /help       — show all commands
 """
 
+import os
+import sys
 import json
 import time
+import math
+import hmac
+import hashlib
 import logging
-import os
-from dotenv import load_dotenv
-load_dotenv()
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-import anthropic
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("openclaw_agent")
+sys.path.append(str(Path(__file__).parent.parent))
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent / ".env")
 
-# ── Shared state file written by the bridge ────────────────────────────────────
-# The Bybit bridge appends a JSON line here after every decision cycle.
-# This agent reads it — completely decoupled, no shared memory.
-TRADE_LOG_PATH   = Path("trade_log.jsonl")
-REPORT_INTERVAL  = 3600   # auto-report every hour (seconds)
+import httpx
+from anthropic import Anthropic
+from telegram import Update
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler,
+    filters, ContextTypes
+)
 
-client = anthropic.Anthropic()
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+log = logging.getLogger("openclaw")
 
-# ── Agent memory (in-process, current session) ────────────────────────────────
-conversation_history = []
+# ── Config ─────────────────────────────────────────────────────────────────────
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY", "")
+BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
+ANTHROPIC_KEY    = os.getenv("ANTHROPIC_API_KEY", "")
+BASE_URL         = "https://api-demo.bybit.com"
+TRADE_LOG        = Path("trade_log_crypto.jsonl")
+PAUSE_FILE       = Path(".bridge_paused")  # bridge checks this file
 
-SYSTEM_PROMPT = """You are an expert quantitative trading oversight agent for a SOL/USDT perpetual futures strategy running on Bybit.
-
-YOUR ROLE:
-You monitor a live hybrid intraday trading strategy and act as an intelligent advisor to the trader (the user).
-You observe, analyse, report, and suggest — but you never execute trades or modify code directly.
-Think of yourself as a sharp, experienced quant sitting next to the trader, watching the same screen.
-
-THE STRATEGY YOU ARE MONITORING:
-- Asset: SOL/USDT linear perpetual on Bybit
-- Timeframe: H1 (hourly candles)
-- Leverage: 3× fixed
-- Signal: Hybrid — 60% technical (EMA 9/21 crossover + RSI filter + ATR momentum), 40% news sentiment (Claude-scored headlines)
-- Entry threshold: fused score must exceed ±0.22
-- Risk per trade: 1% of account balance
-- Stop-loss: 1.5× ATR from entry
-- Take-profit: 2.5× ATR from entry (R:R = 1:1.67)
-- Trailing stop: activates at 60% of TP distance, trails at 40% of SL distance
-- Max 1 open position at a time
-
-YOUR CAPABILITIES:
-1. Read and interpret trade log data passed to you
-2. Identify patterns in signal quality, win rate, and drawdown
-3. Suggest parameter adjustments (ATR multipliers, signal threshold, leverage, weights)
-4. Flag anomalies: suspiciously frequent signals, large losing streaks, sentiment/technical divergence
-5. Generate periodic performance reports
-6. Answer the trader's questions about what the strategy is doing and why
-7. Offer educational context about market conditions affecting SOL
-
-YOUR CONSTRAINTS:
-- Never suggest increasing leverage above 5×
-- Always frame suggestions as observations, not commands
-- When uncertain, say so — do not hallucinate performance data
-- If you see a losing streak of 4+ trades, always flag it prominently
-- Keep reports concise — the trader is busy
-
-TONE: Direct, analytical, occasionally dry. Like a good quant colleague.
-"""
-
-
-# ── Trade log utilities ────────────────────────────────────────────────────────
-
-def read_recent_trades(n: int = 20) -> list[dict]:
-    """Read the last n entries from the trade log."""
-    if not TRADE_LOG_PATH.exists():
-        return []
-    lines = TRADE_LOG_PATH.read_text().strip().split("\n")
-    lines = [l for l in lines if l.strip()]
-    recent = lines[-n:]
-    parsed = []
-    for line in recent:
-        try:
-            parsed.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return parsed
-
-
-def compute_summary(trades: list[dict]) -> dict:
-    """Compute basic performance stats from the trade log."""
-    decisions = [t for t in trades if t.get("execute")]
-    if not decisions:
-        return {"total_signals": 0, "note": "No executed signals in log"}
-
-    total   = len(decisions)
-    longs   = sum(1 for t in decisions if t["fused"]["signal"] == "LONG")
-    shorts  = total - longs
-    flat    = len([t for t in trades if not t.get("execute")])
-
-    # Estimate avg signal strength
-    avg_str = sum(t["fused"]["strength"] for t in decisions) / total
-
-    # Sentiment vs technical agreement rate
-    agree = sum(
-        1 for t in decisions
-        if t["technical"]["signal"] == t["sentiment"]["signal"]
-    )
-    agree_pct = round(agree / total * 100, 1)
-
-    return {
-        "total_signals":      total,
-        "longs":              longs,
-        "shorts":             shorts,
-        "flat_skipped":       flat,
-        "avg_signal_strength": round(avg_str, 3),
-        "tech_sent_agreement_pct": agree_pct,
-    }
-
-
-def format_trades_for_agent(trades: list[dict]) -> str:
-    """Format trade log into a readable summary for the agent."""
-    if not trades:
-        return "No trade log data available yet."
-
-    lines = ["Recent strategy decisions (newest last):"]
-    for t in trades[-10:]:
-        ts   = t.get("timestamp", "?")[:16]
-        sig  = t.get("fused", {}).get("signal", "?")
-        str_ = t.get("fused", {}).get("strength", 0)
-        scr  = t.get("fused", {}).get("score", 0)
-        tech = t.get("technical", {}).get("signal", "?")
-        sent = t.get("sentiment", {}).get("signal", "?")
-        sent_sum = t.get("sentiment", {}).get("summary", "")
-        exe  = t.get("execute", False)
-        qty  = t.get("position", {}).get("qty", 0)
-        sl   = t.get("position", {}).get("sl", 0)
-        tp   = t.get("position", {}).get("tp", 0)
-
-        line = (
-            f"[{ts}] {sig:5s} str={str_:.2f} score={scr:+.3f} "
-            f"tech={tech} sent={sent} exe={'YES' if exe else 'no'}"
-        )
-        if exe:
-            line += f" qty={qty} SL={sl} TP={tp}"
-        if sent_sum:
-            line += f"\n  Sentiment: {sent_sum}"
-        lines.append(line)
-
-    summary = compute_summary(trades)
-    lines.append(f"\nSummary: {json.dumps(summary, indent=2)}")
-    return "\n".join(lines)
-
-
-# ── Agent interaction ──────────────────────────────────────────────────────────
-
-def chat(user_message: str, include_trade_context: bool = True) -> str:
-    """Send a message to the OpenClaw agent and get a response."""
-
-    # Attach trade log context to every message
-    if include_trade_context:
-        trades = read_recent_trades(30)
-        context = format_trades_for_agent(trades)
-        full_message = f"{user_message}\n\n--- Current trade log context ---\n{context}"
-    else:
-        full_message = user_message
-
-    conversation_history.append({"role": "user", "content": full_message})
-
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1000,
-        system=SYSTEM_PROMPT,
-        messages=conversation_history,
-    )
-
-    reply = response.content[0].text
-    conversation_history.append({"role": "assistant", "content": reply})
-
-    # Keep history manageable — last 20 turns
-    if len(conversation_history) > 40:
-        conversation_history[:] = conversation_history[-40:]
-
-    return reply
-
-
-def generate_hourly_report() -> str:
-    """Auto-generate a periodic strategy health report."""
-    prompt = (
-        "Generate a concise hourly strategy report. Cover: "
-        "signal quality, any concerning patterns, SOL market context if relevant, "
-        "and one actionable observation. Keep it under 200 words."
-    )
-    return chat(prompt)
-
-
-def write_trade_decision(decision: dict):
-    """Called by the bridge to log each decision. Append to shared log file."""
-    with open(TRADE_LOG_PATH, "a") as f:
-        f.write(json.dumps(decision) + "\n")
-
-
-# ── CLI REPL ───────────────────────────────────────────────────────────────────
-
-COMMANDS = {
-    "/report":  "Generate a full strategy report",
-    "/trades":  "Show recent trade log summary",
-    "/params":  "Ask the agent to review current parameters",
-    "/risk":    "Get a risk assessment of current settings",
-    "/sol":     "Ask agent for SOL market context right now",
-    "/help":    "Show this command list",
-    "/quit":    "Exit",
+PAIRS = {
+    "BTC": "BTCUSDT",
+    "SOL": "SOLUSDT",
+    "BNB": "BNBUSDT",
 }
 
-def print_help():
-    print("\nAvailable commands:")
-    for cmd, desc in COMMANDS.items():
-        print(f"  {cmd:12s}  {desc}")
-    print("  Or just type any question in natural language.\n")
+claude  = Anthropic(api_key=ANTHROPIC_KEY)
+started = datetime.now(timezone.utc)
 
 
-def run_repl():
-    print("\n" + "="*60)
-    print("  OpenClaw SOL Strategy Oversight Agent")
-    print("  Type /help for commands or ask anything")
-    print("="*60 + "\n")
+# ── Bybit client ───────────────────────────────────────────────────────────────
+def _sign(params: dict) -> dict:
+    ts = str(int(time.time() * 1000))
+    rw = "5000"
+    q  = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    sig = hmac.new(BYBIT_API_SECRET.encode(),
+                   f"{ts}{BYBIT_API_KEY}{rw}{q}".encode(),
+                   hashlib.sha256).hexdigest()
+    return {"X-BAPI-API-KEY": BYBIT_API_KEY, "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": rw, "X-BAPI-SIGN": sig}
 
-    # Greet with an initial context read
-    greeting = chat(
-        "Introduce yourself briefly and give me a one-sentence status on the strategy based on whatever data is available.",
-        include_trade_context=True
+
+def bybit_get(endpoint: str, params: dict = None) -> dict:
+    params = params or {}
+    try:
+        r = httpx.get(f"{BASE_URL}{endpoint}", params=params,
+                      headers=_sign(params), timeout=10)
+        return r.json()
+    except Exception as e:
+        log.error(f"GET {endpoint}: {e}")
+        return {}
+
+
+def bybit_post(endpoint: str, body: dict) -> dict:
+    ts = str(int(time.time() * 1000))
+    rw = "5000"
+    payload = json.dumps(body)
+    sig = hmac.new(BYBIT_API_SECRET.encode(),
+                   f"{ts}{BYBIT_API_KEY}{rw}{payload}".encode(),
+                   hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": BYBIT_API_KEY, "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": rw, "X-BAPI-SIGN": sig,
+        "Content-Type": "application/json"
+    }
+    try:
+        r = httpx.post(f"{BASE_URL}{endpoint}",
+                       content=payload, headers=headers, timeout=10)
+        return r.json()
+    except Exception as e:
+        log.error(f"POST {endpoint}: {e}")
+        return {}
+
+
+# ── Data helpers ───────────────────────────────────────────────────────────────
+def get_balance() -> float:
+    resp = bybit_get("/v5/account/wallet-balance",
+                     {"accountType": "UNIFIED"})
+    try:
+        coins = resp["result"]["list"][0]["coin"]
+        usdt  = next((c for c in coins if c["coin"] == "USDT"), {})
+        return float(usdt.get("walletBalance", 0))
+    except Exception:
+        return 0.0
+
+
+def get_all_positions() -> list[dict]:
+    positions = []
+    for name, symbol in PAIRS.items():
+        resp = bybit_get("/v5/position/list",
+                         {"category": "linear", "symbol": symbol})
+        for pos in resp.get("result", {}).get("list", []):
+            size = float(pos.get("size", 0))
+            if size > 0:
+                entry  = float(pos.get("avgPrice", 0))
+                mark   = float(pos.get("markPrice", 0))
+                side   = pos["side"]
+                upnl   = float(pos.get("unrealisedPnl", 0))
+                mult   = 1 if side == "Buy" else -1
+                pct    = mult*(mark-entry)/entry*100*3 if entry else 0
+                positions.append({
+                    "name":   name,
+                    "symbol": symbol,
+                    "side":   side,
+                    "size":   size,
+                    "entry":  entry,
+                    "mark":   mark,
+                    "upnl":   upnl,
+                    "pct":    pct,
+                })
+    return positions
+
+
+def get_price(symbol: str) -> float:
+    resp = bybit_get("/v5/market/tickers",
+                     {"category": "linear", "symbol": symbol})
+    try:
+        return float(resp["result"]["list"][0]["lastPrice"])
+    except Exception:
+        return 0.0
+
+
+def read_trades(n: int = 50) -> list[dict]:
+    if not TRADE_LOG.exists():
+        return []
+    trades = []
+    with open(TRADE_LOG) as f:
+        for line in f:
+            try:
+                trades.append(json.loads(line.strip()))
+            except Exception:
+                pass
+    return trades[-n:]
+
+
+def is_paused() -> bool:
+    return PAUSE_FILE.exists()
+
+
+def close_position(symbol: str, side: str, size: float) -> bool:
+    close_side = "Sell" if side == "Buy" else "Buy"
+    resp = bybit_post("/v5/order/create", {
+        "category": "linear", "symbol": symbol,
+        "side": close_side, "orderType": "Market",
+        "qty": str(size), "timeInForce": "IOC",
+        "reduceOnly": True,
+    })
+    return resp.get("retCode", -1) == 0
+
+
+# ── Auth check ─────────────────────────────────────────────────────────────────
+def authorized(update: Update) -> bool:
+    if not TELEGRAM_CHAT_ID:
+        return True
+    return str(update.effective_chat.id) == str(TELEGRAM_CHAT_ID)
+
+
+# ── Command handlers ───────────────────────────────────────────────────────────
+async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    await update.message.reply_text(
+        "🤖 *OpenClaw v2 — Command Reference*\n\n"
+        "📊 *Monitoring*\n"
+        "/status — bridge health + positions overview\n"
+        "/positions — open positions with live PnL\n"
+        "/trades — recent trade history\n"
+        "/pnl — P&L breakdown (today/week/total)\n"
+        "/risk — current exposure per pair\n"
+        "/params — strategy parameters\n\n"
+        "🎮 *Control*\n"
+        "/pause — pause new entries\n"
+        "/resume — resume trading\n"
+        "/closeall — close all positions NOW\n"
+        "/close BTC — close specific pair\n\n"
+        "🧠 *AI Analysis*\n"
+        "/report — Claude analysis of recent performance\n\n"
+        "💬 *Chat*\n"
+        "Just type anything — ask Claude about the strategy",
+        parse_mode="Markdown"
     )
-    print(f"Agent: {greeting}\n")
-
-    last_report_time = time.time()
-
-    while True:
-        try:
-            user_input = input("You: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nAgent: Shutting down oversight. Trade safe.")
-            break
-
-        if not user_input:
-            continue
-
-        # Auto hourly report
-        if time.time() - last_report_time > REPORT_INTERVAL:
-            print("\n[Auto-report triggered]")
-            report = generate_hourly_report()
-            print(f"Agent: {report}\n")
-            last_report_time = time.time()
-
-        # Commands
-        if user_input == "/quit":
-            print("Agent: Shutting down oversight. Trade safe.")
-            break
-        elif user_input == "/help":
-            print_help()
-            continue
-        elif user_input == "/report":
-            user_input = "Generate a full strategy performance report including signal quality, parameter health, and any concerns."
-        elif user_input == "/trades":
-            user_input = "Summarise the recent trades for me — what signals fired, did tech and sentiment agree, any patterns?"
-        elif user_input == "/params":
-            user_input = "Review the current strategy parameters (ATR multipliers 1.5/2.5, signal threshold 0.22, 60/40 weight split, 3× leverage). Are they well-calibrated for SOL's current volatility? Any suggestions?"
-        elif user_input == "/risk":
-            user_input = "Give me a risk assessment: is 1% per trade appropriate, is 3× leverage reasonable, what's the worst-case scenario I should be prepared for?"
-        elif user_input == "/sol":
-            user_input = "What should I know about SOL market conditions right now that might affect the strategy? Consider macro, on-chain trends, and any known catalysts."
-
-        response = chat(user_input)
-        print(f"\nAgent: {response}\n")
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    await update.message.reply_text("⏳ Fetching status...")
+
+    balance   = get_balance()
+    positions = get_all_positions()
+    trades    = read_trades(100)
+    uptime    = datetime.now(timezone.utc) - started
+    paused    = is_paused()
+
+    # Count today's trades
+    today = datetime.now(timezone.utc).date()
+    today_trades = [t for t in trades
+                    if datetime.fromisoformat(t["ts"]).date() == today]
+
+    pos_text = ""
+    if positions:
+        for p in positions:
+            emoji = "🟢" if p["side"] == "Buy" else "🔴"
+            sign  = "+" if p["pct"] >= 0 else ""
+            pos_text += (f"\n{emoji} {p['name']}: {p['side']} "
+                        f"{sign}{p['pct']:.2f}% uPnL: ${p['upnl']:.2f}")
+    else:
+        pos_text = "\nNo open positions"
+
+    status_emoji = "⏸" if paused else "✅"
+    await update.message.reply_text(
+        f"*OpenClaw Status*\n\n"
+        f"{status_emoji} Bridge: {'PAUSED' if paused else 'RUNNING'}\n"
+        f"⏱ Uptime: {str(uptime).split('.')[0]}\n"
+        f"💰 Balance: ${balance:,.2f} USDT\n"
+        f"📈 Open positions: {len(positions)}\n"
+        f"📊 Trades today: {len(today_trades)}\n"
+        f"\n*Positions:*{pos_text}",
+        parse_mode="Markdown"
+    )
+
+
+async def cmd_positions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    positions = get_all_positions()
+
+    if not positions:
+        await update.message.reply_text("📭 No open positions")
+        return
+
+    text = "*Open Positions*\n\n"
+    total_upnl = 0
+    for p in positions:
+        emoji  = "🟢" if p["side"] == "Buy" else "🔴"
+        sign   = "+" if p["pct"] >= 0 else ""
+        pnl_e  = "✅" if p["upnl"] >= 0 else "❌"
+        text  += (f"{emoji} *{p['name']}* {p['side']}\n"
+                 f"  Entry: ${p['entry']:,.2f} → Mark: ${p['mark']:,.2f}\n"
+                 f"  {pnl_e} uPnL: ${p['upnl']:+.2f} ({sign}{p['pct']:.2f}%)\n"
+                 f"  Size: {p['size']}\n\n")
+        total_upnl += p["upnl"]
+
+    sign = "+" if total_upnl >= 0 else ""
+    text += f"Total uPnL: *${sign}{total_upnl:.2f}*"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def cmd_trades(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    trades = read_trades(20)
+
+    if not trades:
+        await update.message.reply_text("📭 No trades logged yet")
+        return
+
+    # Show last 10 meaningful actions (not HOLD)
+    actions = [t for t in trades if t.get("action") != "hold"][-10:]
+    text = "*Recent Trades*\n\n"
+    for t in reversed(actions):
+        ts  = datetime.fromisoformat(t["ts"]).strftime("%m/%d %H:%M")
+        sym = t["symbol"].replace("USDT","")
+        act = t["action"].upper()
+        emoji = ("🟢" if "long" in t["action"] else
+                 "🔴" if "short" in t["action"] else
+                 "⚪" if "close" in t["action"] else "📊")
+        text += f"{emoji} {ts} *{sym}* {act} @ ${t['price']:,.2f}\n"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def cmd_pnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    await update.message.reply_text("⏳ Calculating P&L...")
+
+    balance = get_balance()
+    trades  = read_trades(500)
+    now     = datetime.now(timezone.utc)
+
+    # Starting balance estimate from first trade
+    START_BALANCE = 48000.0  # demo account starting balance
+
+    positions = get_all_positions()
+    total_upnl = sum(p["upnl"] for p in positions)
+    realized_pnl = balance - START_BALANCE
+
+    text = "*P&L Report*\n\n"
+    text += f"💰 Current balance: ${balance:,.2f}\n"
+    text += f"📊 Starting balance: ${START_BALANCE:,.2f}\n"
+    text += (f"{'✅' if realized_pnl>=0 else '❌'} "
+             f"Realized P&L: ${realized_pnl:+,.2f} "
+             f"({realized_pnl/START_BALANCE*100:+.2f}%)\n")
+    text += (f"{'✅' if total_upnl>=0 else '❌'} "
+             f"Unrealized P&L: ${total_upnl:+,.2f}\n")
+    text += (f"\n💼 Total equity: "
+             f"${balance+total_upnl:,.2f}\n")
+
+    # Per-pair breakdown from trade log
+    text += "\n*Activity (trade log):*\n"
+    pair_counts = {}
+    for t in trades:
+        sym = t["symbol"].replace("USDT","")
+        if t.get("action") not in ("hold", "regime_blocked"):
+            pair_counts[sym] = pair_counts.get(sym, 0) + 1
+
+    for sym, count in pair_counts.items():
+        text += f"  {sym}: {count} actions\n"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def cmd_risk(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    balance   = get_balance()
+    positions = get_all_positions()
+
+    text = "*Risk Exposure*\n\n"
+    text += f"Balance: ${balance:,.2f}\n"
+    text += f"Leverage: 3×\n"
+    text += f"Risk per trade: 1% = ${balance*0.01:,.2f}\n\n"
+
+    if not positions:
+        text += "No open positions — no current exposure"
+    else:
+        total_notional = 0
+        for p in positions:
+            notional = p["size"] * p["mark"]
+            exposure = notional / balance * 100
+            total_notional += notional
+            text += (f"*{p['name']}*: ${notional:,.0f} notional "
+                    f"({exposure:.1f}% of balance)\n")
+        text += f"\nTotal exposure: ${total_notional:,.0f} "
+        text += f"({total_notional/balance*100:.1f}% of balance)"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def cmd_params(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    text = (
+        "*Strategy Parameters*\n\n"
+        "*BTC/USDT*\n"
+        "  MACD(10,26,9) hist≥0.08% ADX≥25\n\n"
+        "*SOL/USDT*\n"
+        "  MACD(8,21,5) hist≥0.08% ADX≥20\n\n"
+        "*BNB/USDT*\n"
+        "  MACD(10,26,3) hist≥0.01% ADX≥30\n\n"
+        "*Shared filters*\n"
+        "  Kill hours: 16, 17, 18 UTC\n"
+        "  Skip Monday: ✅\n"
+        "  Min hold bars: 16 (4 hours)\n"
+        "  Regime filter: daily ADX ≥ 20\n"
+        "  Leverage: 3×\n"
+        "  Risk per trade: 1%\n"
+        "  Backtested: 2024–2026\n\n"
+        "*Performance (backtest, 3×)*\n"
+        "  BTC: Sharpe 2.197 | DD -11%\n"
+        "  SOL: Sharpe 1.570 | DD -55%\n"
+        "  BNB: Sharpe 2.271 | DD -80%\n"
+        "  Portfolio: Sharpe 2.260 | DD -20%"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    PAUSE_FILE.touch()
+    await update.message.reply_text(
+        "⏸ *Bridge PAUSED*\n\n"
+        "No new positions will be opened.\n"
+        "Existing positions remain open.\n"
+        "Use /resume to restart trading.",
+        parse_mode="Markdown"
+    )
+
+
+async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    if PAUSE_FILE.exists():
+        PAUSE_FILE.unlink()
+    await update.message.reply_text(
+        "▶️ *Bridge RESUMED*\n\nTrading is active again.",
+        parse_mode="Markdown"
+    )
+
+
+async def cmd_closeall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    await update.message.reply_text(
+        "⚠️ *Closing ALL positions...*",
+        parse_mode="Markdown"
+    )
+    positions = get_all_positions()
+    if not positions:
+        await update.message.reply_text("No open positions to close.")
+        return
+
+    closed = []
+    failed = []
+    for p in positions:
+        if close_position(p["symbol"], p["side"], p["size"]):
+            closed.append(p["name"])
+        else:
+            failed.append(p["name"])
+        time.sleep(0.5)
+
+    text = ""
+    if closed:
+        text += f"✅ Closed: {', '.join(closed)}\n"
+    if failed:
+        text += f"❌ Failed: {', '.join(failed)}"
+    await update.message.reply_text(text or "Done.")
+
+
+async def cmd_close(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    args = ctx.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: /close BTC or /close SOL or /close BNB"
+        )
+        return
+
+    name = args[0].upper()
+    if name not in PAIRS:
+        await update.message.reply_text(f"Unknown pair: {name}. Use BTC, SOL, or BNB.")
+        return
+
+    positions = get_all_positions()
+    pos = next((p for p in positions if p["name"] == name), None)
+    if not pos:
+        await update.message.reply_text(f"No open position for {name}.")
+        return
+
+    if close_position(pos["symbol"], pos["side"], pos["size"]):
+        await update.message.reply_text(
+            f"✅ Closed {name} {pos['side']} position\n"
+            f"uPnL was: ${pos['upnl']:+.2f}"
+        )
+    else:
+        await update.message.reply_text(f"❌ Failed to close {name} — check logs.")
+
+
+async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    await update.message.reply_text("🧠 Generating AI report...")
+
+    trades    = read_trades(100)
+    balance   = get_balance()
+    positions = get_all_positions()
+
+    actions = [t for t in trades if t.get("action") != "hold"]
+    summary = {
+        "balance":        balance,
+        "open_positions": len(positions),
+        "recent_actions": actions[-20:],
+        "total_actions":  len(actions),
+        "pairs_active":   list({t["symbol"] for t in actions}),
+    }
+
+    prompt = f"""You are OpenClaw, an AI trading assistant monitoring a live crypto trading bot.
+
+Current bot state:
+{json.dumps(summary, indent=2)}
+
+Provide a concise trading report covering:
+1. Current status and activity level
+2. Which pairs are most active
+3. Any patterns you notice in timing or signal frequency
+4. Risk assessment based on position count and balance
+5. One actionable recommendation
+
+Keep it under 200 words. Be direct and specific."""
+
+    try:
+        resp = claude.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        report = resp.content[0].text
+    except Exception as e:
+        report = f"Claude unavailable: {e}"
+
+    await update.message.reply_text(
+        f"🧠 *AI Report*\n\n{report}",
+        parse_mode="Markdown"
+    )
+
+
+async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle free-form chat — ask Claude anything about the strategy."""
+    if not authorized(update): return
+
+    user_msg  = update.message.text
+    trades    = read_trades(50)
+    balance   = get_balance()
+    positions = get_all_positions()
+
+    context = (
+        f"Balance: ${balance:,.2f} | "
+        f"Open positions: {len(positions)} | "
+        f"Recent trades logged: {len(trades)}"
+    )
+
+    try:
+        resp = claude.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=300,
+            system=(
+                "You are OpenClaw, an AI assistant for a crypto trading bot "
+                "running MACD/ADX strategy on BTC, SOL, BNB perpetuals on Bybit. "
+                "The strategy uses kill hours 16-18 UTC, skip Monday, min hold 16 bars, "
+                "3x leverage, 1% risk per trade. "
+                "Be concise, specific, and helpful. Answer in plain text without markdown."
+                f"\nCurrent state: {context}"
+            ),
+            messages=[{"role": "user", "content": user_msg}]
+        )
+        await update.message.reply_text(resp.content[0].text)
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
+
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+def main():
+    if not TELEGRAM_TOKEN:
+        log.error("TELEGRAM_BOT_TOKEN not set in .env")
+        return
+
+    log.info("🤖 OpenClaw v2 starting...")
+
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("help",      cmd_help))
+    app.add_handler(CommandHandler("start",     cmd_help))
+    app.add_handler(CommandHandler("status",    cmd_status))
+    app.add_handler(CommandHandler("positions", cmd_positions))
+    app.add_handler(CommandHandler("trades",    cmd_trades))
+    app.add_handler(CommandHandler("pnl",       cmd_pnl))
+    app.add_handler(CommandHandler("risk",      cmd_risk))
+    app.add_handler(CommandHandler("params",    cmd_params))
+    app.add_handler(CommandHandler("pause",     cmd_pause))
+    app.add_handler(CommandHandler("resume",    cmd_resume))
+    app.add_handler(CommandHandler("closeall",  cmd_closeall))
+    app.add_handler(CommandHandler("close",     cmd_close))
+    app.add_handler(CommandHandler("report",    cmd_report))
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND, handle_message
+    ))
+
+    log.info("OpenClaw v2 running — waiting for commands")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
-    run_repl()
+    main()
