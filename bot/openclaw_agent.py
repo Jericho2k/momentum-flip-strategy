@@ -569,9 +569,11 @@ def main():
 
     log.info("🤖 OpenClaw v2 starting...")
 
-    builder = Application.builder().token(TELEGRAM_TOKEN)
     if PROXY:
-        builder = builder.request(HTTPXRequest(proxy=PROXY))
+        request = HTTPXRequest(proxy=PROXY)
+        builder = Application.builder().token(TELEGRAM_TOKEN).request(request)
+    else:
+        builder = Application.builder().token(TELEGRAM_TOKEN)
     app = builder.build()
 
     app.add_handler(CommandHandler("help",      cmd_help))
