@@ -1,384 +1,541 @@
 """
-MACD/ADX Bybit Bridge — raw HTTP implementation
-Bypasses pybit entirely to avoid demo trading auth issues.
-Uses Bybit V5 API directly with HMAC-SHA256 signing.
+Multi-Pair Crypto Execution Bridge — Bybit Demo
+=================================================
+Runs BTC/USDT, SOL/USDT, BNB/USDT simultaneously on Bybit perpetuals.
+Each pair has independent params, signals, and position management.
+Checks signals every 15 minutes, sends Telegram notifications.
+
+Validated params (backtested 2024-2026, 3× leverage):
+  BTC/USDT  MACD(10,26,9) hist≥0.08% ADX≥25  Sharpe 2.197  DD -11%
+  SOL/USDT  MACD(8,21,5)  hist≥0.08% ADX≥20  Sharpe 1.570  DD -55%
+  BNB/USDT  MACD(10,26,3) hist≥0.01% ADX≥30  Sharpe 2.271  DD -80%
+
+Shared filters (all pairs):
+  Kill hours: 16, 17, 18 UTC
+  Skip Monday entries
+  Min hold bars: 16
+  Regime filter: daily ADX ≥ 20
+
+Setup:
+  Add to .env:
+    BYBIT_API_KEY=your_demo_api_key
+    BYBIT_API_SECRET=your_demo_api_secret
+    TELEGRAM_BOT_TOKEN=your_bot_token
+    TELEGRAM_CHAT_ID=your_chat_id
+
+Run:
+  python bot/macd_adx_bridge.py
 """
 
 import os
 import sys
+import time
+import math
+import json
 import hmac
 import hashlib
-import json
-import time
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from dataclasses import dataclass
 
 sys.path.append(str(Path(__file__).parent.parent))
-
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 import httpx
 
-from backtest.macd_adx_strategy import StrategyParams, generate_signals, Bar
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("macd_adx_bridge")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+log = logging.getLogger("crypto_bridge")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-SYMBOL        = "SOLUSDT"
-CATEGORY      = "linear"
-LOOP_INTERVAL = 300
-CANDLES       = 200  # need more bars for warmup on 15m
-TRADE_LOG     = Path("trade_log_macd.jsonl")
-
 API_KEY    = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
-BASE_URL   = "https://api-demo.bybit.com"  # demo trading
+BASE_URL   = "https://api-demo.bybit.com"
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-PARAMS = StrategyParams(
-    macd_fast         = 12,
-    macd_slow         = 28,
-    macd_signal       = 5,
-    min_hist_pct      = 0.0008,   # 0.08% of price
-    adx_period        = 14,
-    adx_level         = 20.0,
-    session_start     = None,
-    session_end       = None,
-    morning_stop      = False,
-    sl_pips           = 0.0,
-    leverage          = 2,
-    regime_adx_period = 14,
-    regime_adx_level  = 20.0,
-    regime_enabled    = True,
-)
+LOOP_INTERVAL  = 900    # 15 minutes
+CANDLES_NEEDED = 300    # enough for all MACD warmup periods
+LEVERAGE       = 3
+RISK_PCT       = 0.01   # 1% per trade
+TRADE_LOG      = Path("trade_log_crypto.jsonl")
 
-DAILY_CANDLES = 60  # daily bars to fetch for regime filter
 
-# ── Raw Bybit HTTP client ──────────────────────────────────────────────────────
+# ── Pair configurations ────────────────────────────────────────────────────────
+@dataclass
+class PairConfig:
+    symbol:       str
+    display:      str
+    macd_fast:    int
+    macd_slow:    int
+    macd_signal:  int
+    min_hist_pct: float
+    adx_level:    float
+    min_hold_bars: int = 16
+    kill_hours:   tuple = (16, 17, 18)
+    skip_monday:  bool = True
+    regime_adx:   float = 20.0
 
-def _sign(payload: str) -> tuple[str, str]:
-    ts  = str(int(time.time() * 1000))
-    recv_window = "5000"
-    param_str = ts + API_KEY + recv_window + payload
-    sig = hmac.new(
-        bytes(API_SECRET, "utf-8"),
-        bytes(param_str, "utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-    return ts, sig
+PAIRS = [
+    PairConfig("BTCUSDT", "BTC/USDT", 10, 26, 9, 0.0008, 25.0),
+    PairConfig("SOLUSDT", "SOL/USDT", 8,  21, 5, 0.0008, 20.0),
+    PairConfig("BNBUSDT", "BNB/USDT", 10, 26, 3, 0.0001, 30.0),
+]
 
-def _headers(ts: str, sig: str) -> dict:
-    return {
-        "X-BAPI-API-KEY":     API_KEY,
-        "X-BAPI-TIMESTAMP":   ts,
-        "X-BAPI-SIGN":        sig,
-        "X-BAPI-RECV-WINDOW": "5000",
-        "Content-Type":       "application/json",
+# Per-pair runtime state
+state = {
+    p.symbol: {
+        "signal":    None,   # current position direction
+        "entry_bar": 0,      # bar index when position was entered
+        "bar_count": 0,      # total bars processed
     }
-
-def bybit_get(endpoint: str, params: dict) -> dict:
-    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
-    ts, sig = _sign(query)
-    try:
-        r = httpx.get(
-            f"{BASE_URL}{endpoint}",
-            params=params,
-            headers=_headers(ts, sig),
-            timeout=10
-        )
-        data = r.json()
-        if data.get("retCode") != 0:
-            log.error(f"{endpoint}: {data.get('retMsg')}")
-        return data
-    except Exception as e:
-        log.error(f"GET {endpoint} failed: {e}")
-        return {}
-
-def bybit_post(endpoint: str, body: dict) -> dict:
-    body_str = json.dumps(body, separators=(',', ':'))
-    ts, sig  = _sign(body_str)
-    try:
-        r = httpx.post(
-            f"{BASE_URL}{endpoint}",
-            content=body_str,
-            headers=_headers(ts, sig),
-            timeout=10
-        )
-        data = r.json()
-        if data.get("retCode") != 0:
-            log.warning(f"{endpoint}: {data.get('retMsg')}")
-        return data
-    except Exception as e:
-        log.error(f"POST {endpoint} failed: {e}")
-        return {}
-
-# ── API calls ──────────────────────────────────────────────────────────────────
-
-def set_leverage():
-    resp = bybit_post("/v5/position/set-leverage", {
-        "category":     CATEGORY,
-        "symbol":       SYMBOL,
-        "buyLeverage":  str(PARAMS.leverage),
-        "sellLeverage": str(PARAMS.leverage),
-    })
-    if resp.get("retCode") == 0:
-        log.info(f"Leverage set to {PARAMS.leverage}x")
-    else:
-        log.warning(f"Leverage: {resp.get('retMsg', 'unknown')}")
+    for p in PAIRS
+}
 
 
-def get_balance() -> float:
-    resp = bybit_get("/v5/account/wallet-balance", {"accountType": "UNIFIED"})
-    try:
-        return float(resp["result"]["list"][0]["totalWalletBalance"])
-    except:
-        log.error(f"Balance fetch failed: {resp.get('retMsg', resp)}")
-        return 0.0
-
-
-def get_position() -> dict:
-    resp = bybit_get("/v5/position/list", {"category": CATEGORY, "symbol": SYMBOL})
-    try:
-        positions = [p for p in resp["result"]["list"] if float(p["size"]) > 0]
-        return positions[0] if positions else {}
-    except:
-        log.error(f"Position fetch failed: {resp.get('retMsg', resp)}")
-        return {}
-
-
-def get_candles() -> list[Bar]:
-    resp = httpx.get(
-        f"{BASE_URL}/v5/market/kline",
-        params={"category": CATEGORY, "symbol": SYMBOL, "interval": "15", "limit": CANDLES},
-        timeout=10
-    ).json()
-    try:
-        raw = list(reversed(resp["result"]["list"]))
-        return [
-            Bar(
-                timestamp = int(c[0]) // 1000,
-                open      = float(c[1]),
-                high      = float(c[2]),
-                low       = float(c[3]),
-                close     = float(c[4]),
-                volume    = float(c[5]),
-            )
-            for c in raw
-        ]
-    except Exception as e:
-        log.error(f"Candle fetch failed: {e}")
-        return []
-
-
-def get_daily_candles() -> list[Bar]:
-    resp = httpx.get(
-        f"{BASE_URL}/v5/market/kline",
-        params={"category": CATEGORY, "symbol": SYMBOL, "interval": "D", "limit": DAILY_CANDLES},
-        timeout=10
-    ).json()
-    try:
-        raw = list(reversed(resp["result"]["list"]))
-        return [
-            Bar(
-                timestamp = int(c[0]) // 1000,
-                open      = float(c[1]),
-                high      = float(c[2]),
-                low       = float(c[3]),
-                close     = float(c[4]),
-                volume    = float(c[5]),
-            )
-            for c in raw
-        ]
-    except Exception as e:
-        log.error(f"Daily candle fetch failed: {e}")
-        return []
-
-
-def check_regime(daily_bars: list[Bar]) -> bool:
-    """Returns True if daily ADX >= regime_adx_level (OK to trade), False otherwise."""
-    if not PARAMS.regime_enabled or not daily_bars:
-        return True
-    from backtest.macd_adx_strategy import adx_series
-    highs  = [b.high  for b in daily_bars]
-    lows   = [b.low   for b in daily_bars]
-    closes = [b.close for b in daily_bars]
-    adx    = adx_series(highs, lows, closes, PARAMS.regime_adx_period)
-    valid  = [v for v in adx if not math.isnan(v)]
-    if not valid:
-        return True
-    latest_adx = valid[-1]
-    log.info(f"Regime daily ADX={latest_adx:.2f} (threshold={PARAMS.regime_adx_level})")
-    return latest_adx >= PARAMS.regime_adx_level
-
-
-def calc_qty(balance: float, price: float) -> float:
-    notional = balance * 0.10 * PARAMS.leverage
-    qty = round(notional / price, 1)
-    return max(1.0, qty)
-
-
-def place_order(side: str, qty: float, reduce_only: bool = False) -> bool:
-    body = {
-        "category":    CATEGORY,
-        "symbol":      SYMBOL,
-        "side":        side,
-        "orderType":   "Market",
-        "qty":         str(qty),
-        "reduceOnly":  reduce_only,
-        "timeInForce": "IOC",
-    }
-    resp = bybit_post("/v5/order/create", body)
-    if resp.get("retCode") == 0:
-        log.info(f"✅ {side} {qty} SOL | orderId={resp['result']['orderId']}")
-        return True
-    else:
-        log.error(f"Order failed: {resp.get('retCode')} — {resp.get('retMsg')}")
-        return False
-
-
-def close_position(position: dict) -> bool:
-    if not position:
-        return True
-    side = "Sell" if position["side"] == "Buy" else "Buy"
-    qty  = float(position["size"])
-    return place_order(side, qty, reduce_only=True)
-
-
-def notify_telegram(message: str):
-    token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-    if not token or not chat_id:
+# ── Telegram ───────────────────────────────────────────────────────────────────
+def notify(msg: str):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
         httpx.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"},
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"},
             timeout=5
         )
-    except:
+    except Exception:
         pass
 
 
-def log_decision(data: dict):
+# ── Bybit REST client ──────────────────────────────────────────────────────────
+def _sign(params: dict) -> dict:
+    ts = str(int(time.time() * 1000))
+    recv_window = "5000"
+    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    raw = f"{ts}{API_KEY}{recv_window}{query}"
+    sig = hmac.new(API_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()
+    return {"X-BAPI-API-KEY": API_KEY, "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": recv_window, "X-BAPI-SIGN": sig}
+
+
+def bybit_get(endpoint: str, params: dict = None) -> dict:
+    params = params or {}
+    try:
+        r = httpx.get(f"{BASE_URL}{endpoint}", params=params,
+                      headers=_sign(params), timeout=15)
+        return r.json()
+    except Exception as e:
+        log.error(f"GET {endpoint}: {e}")
+        return {}
+
+
+def bybit_post(endpoint: str, body: dict) -> dict:
+    ts = str(int(time.time() * 1000))
+    recv_window = "5000"
+    payload = json.dumps(body)
+    raw = f"{ts}{API_KEY}{recv_window}{payload}"
+    sig = hmac.new(API_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": API_KEY, "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": recv_window, "X-BAPI-SIGN": sig,
+        "Content-Type": "application/json"
+    }
+    try:
+        r = httpx.post(f"{BASE_URL}{endpoint}", content=payload,
+                       headers=headers, timeout=15)
+        return r.json()
+    except Exception as e:
+        log.error(f"POST {endpoint}: {e}")
+        return {}
+
+
+# ── Market data ────────────────────────────────────────────────────────────────
+def get_candles(symbol: str, interval: str = "15", count: int = 300) -> list[dict]:
+    resp = bybit_get("/v5/market/kline", {
+        "category": "linear", "symbol": symbol,
+        "interval": interval, "limit": str(count)
+    })
+    bars = []
+    for c in reversed(resp.get("result", {}).get("list", [])):
+        bars.append({
+            "t": int(c[0]) // 1000,
+            "o": float(c[1]), "h": float(c[2]),
+            "l": float(c[3]), "c": float(c[4]),
+        })
+    return bars
+
+
+def get_account_balance() -> float:
+    resp = bybit_get("/v5/account/wallet-balance", {"accountType": "UNIFIED"})
+    try:
+        coins = resp["result"]["list"][0]["coin"]
+        usdt  = next((c for c in coins if c["coin"] == "USDT"), {})
+        return float(usdt.get("walletBalance", 0))
+    except Exception:
+        return 0.0
+
+
+def get_position(symbol: str) -> dict | None:
+    resp = bybit_get("/v5/position/list", {
+        "category": "linear", "symbol": symbol
+    })
+    for pos in resp.get("result", {}).get("list", []):
+        size = float(pos.get("size", 0))
+        if size > 0:
+            return {
+                "side": pos["side"],   # "Buy" or "Sell"
+                "size": size,
+                "entry_price": float(pos.get("avgPrice", 0)),
+            }
+    return None
+
+
+def set_leverage(symbol: str, leverage: int):
+    bybit_post("/v5/position/set-leverage", {
+        "category": "linear", "symbol": symbol,
+        "buyLeverage": str(leverage), "sellLeverage": str(leverage)
+    })
+
+
+# ── Indicators ─────────────────────────────────────────────────────────────────
+def ema(prices: list[float], period: int) -> list[float]:
+    k   = 2.0 / (period + 1)
+    out = [float("nan")] * (period - 1)
+    out.append(sum(prices[:period]) / period)
+    for p in prices[period:]:
+        out.append(p * k + out[-1] * (1 - k))
+    return out
+
+
+def macd_hist(closes: list[float], fast: int, slow: int, signal: int) -> list[float]:
+    fe = ema(closes, fast)
+    se = ema(closes, slow)
+    macd = [(f-s) if not (math.isnan(f) or math.isnan(s)) else float("nan")
+            for f, s in zip(fe, se)]
+    valid = [v for v in macd if not math.isnan(v)]
+    vs    = ema(valid, signal) if len(valid) >= signal else []
+    sig   = [float("nan")] * len(macd)
+    vi    = next((i for i, v in enumerate(macd) if not math.isnan(v)), len(macd))
+    for i, v in enumerate(vs):
+        if vi + i < len(sig):
+            sig[vi + i] = v
+    return [(m-s) if not (math.isnan(m) or math.isnan(s)) else float("nan")
+            for m, s in zip(macd, sig)]
+
+
+def adx_val(highs: list[float], lows: list[float],
+            closes: list[float], period: int) -> float:
+    n = len(closes)
+    if n < period * 3:
+        return float("nan")
+    trs, pdms, ndms = [], [], []
+    for i in range(1, n):
+        tr  = max(highs[i]-lows[i],
+                  abs(highs[i]-closes[i-1]),
+                  abs(lows[i]-closes[i-1]))
+        pdm = max(highs[i]-highs[i-1], 0) \
+              if (highs[i]-highs[i-1]) > (lows[i-1]-lows[i]) else 0
+        ndm = max(lows[i-1]-lows[i], 0) \
+              if (lows[i-1]-lows[i]) > (highs[i]-highs[i-1]) else 0
+        trs.append(tr); pdms.append(pdm); ndms.append(ndm)
+
+    def ws(arr):
+        o = [sum(arr[:period])]
+        for v in arr[period:]:
+            o.append(o[-1] - o[-1]/period + v)
+        return o
+
+    atr_s = ws(trs); pdm_s = ws(pdms); ndm_s = ws(ndms)
+    dx_vals = []
+    for a, pm, nm in zip(atr_s, pdm_s, ndm_s):
+        if a == 0:
+            continue
+        pdi = 100*pm/a; ndi = 100*nm/a
+        dx_vals.append(100*abs(pdi-ndi)/(pdi+ndi) if (pdi+ndi) else 0)
+
+    if len(dx_vals) < period:
+        return float("nan")
+    adx = sum(dx_vals[:period]) / period
+    for v in dx_vals[period:]:
+        adx = (adx * (period-1) + v) / period
+    return adx
+
+
+# ── Regime filter ──────────────────────────────────────────────────────────────
+def regime_ok(symbol: str, cfg: PairConfig) -> bool:
+    daily = get_candles(symbol, interval="D", count=60)
+    if len(daily) < 30:
+        return True
+    h = [c["h"] for c in daily]
+    l = [c["l"] for c in daily]
+    c = [c["c"] for c in daily]
+    adx = adx_val(h, l, c, 14)
+    if math.isnan(adx):
+        return True
+    ok = adx >= cfg.regime_adx
+    log.info(f"  {symbol} daily ADX={adx:.1f} regime={'OK' if ok else 'BLOCKED'}")
+    return ok
+
+
+# ── Signal logic ───────────────────────────────────────────────────────────────
+def get_signal(bars: list[dict], cfg: PairConfig, s: dict) -> str:
+    """Returns LONG, SHORT, CLOSE, or HOLD."""
+    if len(bars) < cfg.macd_slow + cfg.macd_signal + 20:
+        return "HOLD"
+
+    closes = [b["c"] for b in bars]
+    highs  = [b["h"] for b in bars]
+    lows   = [b["l"] for b in bars]
+
+    hist   = macd_hist(closes, cfg.macd_fast, cfg.macd_slow, cfg.macd_signal)
+    adx    = adx_val(highs, lows, closes, 14)
+    h_now  = hist[-1]
+    h_prev = hist[-2]
+    price  = closes[-1]
+
+    if math.isnan(h_now) or math.isnan(h_prev) or math.isnan(adx):
+        return "HOLD"
+
+    dt   = datetime.fromtimestamp(bars[-1]["t"], tz=timezone.utc)
+    hour = dt.hour
+    dow  = dt.weekday()  # 0=Monday
+
+    # Kill hours
+    if hour in cfg.kill_hours:
+        return "CLOSE"
+
+    # Skip Monday new entries
+    if cfg.skip_monday and dow == 0:
+        return "HOLD"
+
+    # ADX filter
+    if adx < cfg.adx_level:
+        return "HOLD"
+
+    # Histogram filter
+    if abs(h_now) < price * cfg.min_hist_pct:
+        return "HOLD"
+
+    # Crossover
+    cross_up   = h_prev <= 0 and h_now > 0
+    cross_down = h_prev >= 0 and h_now < 0
+
+    current   = s["signal"]
+    bars_held = s["bar_count"] - s["entry_bar"]
+
+    if cross_up and current != "LONG":
+        if current is not None and bars_held < cfg.min_hold_bars:
+            return "HOLD"
+        return "LONG"
+
+    if cross_down and current != "SHORT":
+        if current is not None and bars_held < cfg.min_hold_bars:
+            return "HOLD"
+        return "SHORT"
+
+    return "HOLD"
+
+
+# ── Order execution ────────────────────────────────────────────────────────────
+def calc_qty(balance: float, price: float, symbol: str) -> float:
+    """Calculate position size. Returns quantity in base currency."""
+    notional = balance * RISK_PCT * LEVERAGE
+    qty      = notional / price
+    # Round to Bybit's minimum qty increments
+    if "BTC" in symbol:
+        return round(qty, 3)
+    elif "BNB" in symbol:
+        return round(qty, 2)
+    else:
+        return round(qty, 1)
+
+
+def place_order(symbol: str, side: str, qty: float) -> bool:
+    """Place a market order. side = 'Buy' or 'Sell'."""
+    resp = bybit_post("/v5/order/create", {
+        "category":    "linear",
+        "symbol":      symbol,
+        "side":        side,
+        "orderType":   "Market",
+        "qty":         str(qty),
+        "timeInForce": "IOC",
+    })
+    ret = resp.get("retCode", -1)
+    if ret == 0:
+        log.info(f"✅ {side} {qty} {symbol}")
+        return True
+    log.error(f"Order failed {symbol}: {resp.get('retMsg')} (code {ret})")
+    return False
+
+
+def close_position(symbol: str, pos: dict) -> bool:
+    """Close an existing position."""
+    side = "Sell" if pos["side"] == "Buy" else "Buy"
+    resp = bybit_post("/v5/order/create", {
+        "category":    "linear",
+        "symbol":      symbol,
+        "side":        side,
+        "orderType":   "Market",
+        "qty":         str(pos["size"]),
+        "timeInForce": "IOC",
+        "reduceOnly":  True,
+    })
+    ret = resp.get("retCode", -1)
+    if ret == 0:
+        log.info(f"✅ Closed {pos['side']} {symbol}")
+        return True
+    log.error(f"Close failed {symbol}: {resp.get('retMsg')}")
+    return False
+
+
+# ── Trade log ──────────────────────────────────────────────────────────────────
+def log_trade(symbol: str, signal: str, price: float,
+              balance: float, action: str):
+    entry = {
+        "ts":      datetime.now(timezone.utc).isoformat(),
+        "symbol":  symbol,
+        "signal":  signal,
+        "price":   price,
+        "balance": balance,
+        "action":  action,
+    }
     with open(TRADE_LOG, "a") as f:
-        f.write(json.dumps(data) + "\n")
+        f.write(json.dumps(entry) + "\n")
 
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
-
 def run():
-    log.info("MACD/ADX Bridge starting (raw HTTP mode)")
-    log.info(f"Params: MACD({PARAMS.macd_fast},{PARAMS.macd_slow},{PARAMS.macd_signal}) "
-             f"hist>={PARAMS.min_hist_pct*100:.3f}% ADX>={PARAMS.adx_level} | {PARAMS.leverage}x")
-    log.info(f"Endpoint: {BASE_URL}")
+    log.info("🚀 Crypto Bridge starting")
+    log.info(f"Pairs: {', '.join(p.display for p in PAIRS)}")
+    log.info(f"Leverage: {LEVERAGE}×  |  Risk per trade: {RISK_PCT*100}%")
 
-    if not API_KEY or not API_SECRET:
-        log.error("BYBIT_API_KEY or BYBIT_API_SECRET not set in .env")
+    if not API_KEY:
+        log.error("BYBIT_API_KEY not set in .env")
         return
 
-    set_leverage()
-    notify_telegram("MACD/ADX bot started\nMACD(8,21,9) ADX>=25 | 2x | Demo Trading")
+    # Set leverage for all pairs
+    for cfg in PAIRS:
+        set_leverage(cfg.symbol, LEVERAGE)
+        log.info(f"Set {LEVERAGE}× leverage on {cfg.display}")
+        time.sleep(0.5)
 
-    current_signal = None
+    balance = get_account_balance()
+    log.info(f"Balance: ${balance:.2f} USDT")
+    notify(f"🚀 *Crypto Bridge started*\n"
+           f"Pairs: BTC · SOL · BNB\n"
+           f"Leverage: {LEVERAGE}× | Balance: ${balance:.2f}")
+
+    tick = 0
 
     while True:
         try:
-            log.info(f"── {datetime.now(timezone.utc).strftime('%H:%M UTC')} ──")
+            tick += 1
+            now = datetime.now(timezone.utc)
+            log.info(f"\n── Tick #{tick} @ {now.strftime('%Y-%m-%d %H:%M UTC')} ──")
 
-            bars        = get_candles()
-            daily_bars  = get_daily_candles()
-            if len(bars) < 60:
-                log.warning(f"Only {len(bars)} bars — waiting")
-                time.sleep(60)
-                continue
+            balance = get_account_balance()
+            log.info(f"Balance: ${balance:.2f} USDT")
 
-            in_regime = check_regime(daily_bars)
-            signals   = generate_signals(bars, PARAMS, regime_bars=daily_bars)
-            position  = get_position()
-            balance   = get_balance()
-            price     = bars[-1].close
-            last_sig  = signals[-1] if signals else None
+            for cfg in PAIRS:
+                try:
+                    s = state[cfg.symbol]
+                    s["bar_count"] += 1
 
-            log.info(
-                f"SOL @ ${price:.3f} | balance=${balance:.2f} | "
-                f"position={'yes ('+position['side']+')' if position else 'none'} | "
-                f"signal={last_sig.action if last_sig else 'none'}"
-            )
+                    bars = get_candles(cfg.symbol, count=CANDLES_NEEDED)
+                    if not bars:
+                        log.warning(f"{cfg.display}: no candles")
+                        continue
 
-            decision = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "price":     price,
-                "signal":    last_sig.action if last_sig else "none",
-                "adx":       round(last_sig.adx_value, 2) if last_sig else 0,
-                "histogram": round(last_sig.hist_value, 4) if last_sig else 0,
-                "position":  position.get("side", "none"),
-                "balance":   balance,
-            }
-            log_decision(decision)
+                    price  = bars[-1]["c"]
+                    signal = get_signal(bars, cfg, s)
+                    pos    = get_position(cfg.symbol)
+                    pos_side = pos["side"] if pos else "none"
 
-            if not in_regime:
-                log.info("Regime filter: choppy market — holding flat")
-                if position:
-                    log.info("Closing position due to regime filter")
-                    close_position(position)
-                    notify_telegram(f"Position closed — regime filter (low daily ADX) @ ${price:.3f}")
-                    current_signal = None
-                time.sleep(LOOP_INTERVAL)
-                continue
+                    log.info(f"{cfg.display} @ ${price:,.2f} | "
+                             f"signal={signal} | pos={pos_side}")
 
-            if last_sig is None:
-                log.info("No signal — holding")
-                time.sleep(LOOP_INTERVAL)
-                continue
+                    action = "hold"
 
-            sig_action = last_sig.action
+                    # CLOSE — kill hour triggered
+                    if signal == "CLOSE":
+                        if pos:
+                            if close_position(cfg.symbol, pos):
+                                pnl_est = ""
+                                if pos["entry_price"]:
+                                    mult = 1 if pos["side"]=="Buy" else -1
+                                    pct  = mult*(price-pos["entry_price"])/pos["entry_price"]*100*LEVERAGE
+                                    pnl_est = f"\nEst. PnL: {pct:+.2f}%"
+                                notify(f"⚪ *{cfg.display} closed*\n"
+                                       f"Reason: kill hour {now.hour}:00 UTC\n"
+                                       f"Price: ${price:,.2f}{pnl_est}")
+                                s["signal"] = None
+                                action = "closed"
 
-            if sig_action != current_signal:
-                if sig_action == "LONG":
-                    if position and position.get("side") == "Sell":
-                        log.info("Flipping SHORT -> LONG")
-                        close_position(position)
-                    qty = calc_qty(balance, price)
-                    log.info(f"Opening LONG {qty} SOL")
-                    if place_order("Buy", qty):
-                        current_signal = "LONG"
-                        notify_telegram(
-                            f"LONG opened\n"
-                            f"${price:.3f} | {qty} SOL | 2x\n"
-                            f"ADX={last_sig.adx_value:.1f} hist={last_sig.hist_value:.3f}"
-                        )
+                    # LONG signal
+                    elif signal == "LONG":
+                        # Check regime filter
+                        if not regime_ok(cfg.symbol, cfg):
+                            notify(f"🚫 *{cfg.display}* LONG signal blocked by regime filter")
+                            action = "regime_blocked"
+                        else:
+                            # Close existing short first
+                            if pos and pos["side"] == "Sell":
+                                close_position(cfg.symbol, pos)
+                                time.sleep(1)
+                                pos = None
 
-                elif sig_action == "SHORT":
-                    if position and position.get("side") == "Buy":
-                        log.info("Flipping LONG -> SHORT")
-                        close_position(position)
-                    qty = calc_qty(balance, price)
-                    log.info(f"Opening SHORT {qty} SOL")
-                    if place_order("Sell", qty):
-                        current_signal = "SHORT"
-                        notify_telegram(
-                            f"SHORT opened\n"
-                            f"${price:.3f} | {qty} SOL | 2x\n"
-                            f"ADX={last_sig.adx_value:.1f} hist={last_sig.hist_value:.3f}"
-                        )
+                            if not pos:
+                                qty = calc_qty(balance, price, cfg.symbol)
+                                if place_order(cfg.symbol, "Buy", qty):
+                                    s["signal"]    = "LONG"
+                                    s["entry_bar"] = s["bar_count"]
+                                    notify(f"🟢 *{cfg.display} LONG*\n"
+                                           f"Price: ${price:,.2f} | Qty: {qty}\n"
+                                           f"MACD({cfg.macd_fast},{cfg.macd_slow},"
+                                           f"{cfg.macd_signal}) ADX≥{cfg.adx_level:.0f}")
+                                    action = "opened_long"
 
-                elif sig_action == "CLOSE":
-                    if position:
-                        log.info("Closing on CLOSE signal")
-                        close_position(position)
-                        notify_telegram(f"Position closed @ ${price:.3f}")
-                        current_signal = None
-            else:
-                log.info(f"Signal unchanged ({sig_action}) — no action")
+                    # SHORT signal
+                    elif signal == "SHORT":
+                        if not regime_ok(cfg.symbol, cfg):
+                            notify(f"🚫 *{cfg.display}* SHORT signal blocked by regime filter")
+                            action = "regime_blocked"
+                        else:
+                            # Close existing long first
+                            if pos and pos["side"] == "Buy":
+                                close_position(cfg.symbol, pos)
+                                time.sleep(1)
+                                pos = None
+
+                            if not pos:
+                                qty = calc_qty(balance, price, cfg.symbol)
+                                if place_order(cfg.symbol, "Sell", qty):
+                                    s["signal"]    = "SHORT"
+                                    s["entry_bar"] = s["bar_count"]
+                                    notify(f"🔴 *{cfg.display} SHORT*\n"
+                                           f"Price: ${price:,.2f} | Qty: {qty}\n"
+                                           f"MACD({cfg.macd_fast},{cfg.macd_slow},"
+                                           f"{cfg.macd_signal}) ADX≥{cfg.adx_level:.0f}")
+                                    action = "opened_short"
+
+                    log_trade(cfg.symbol, signal, price, balance, action)
+                    time.sleep(1)
+
+                except Exception as e:
+                    log.exception(f"{cfg.display} error: {e}")
 
         except KeyboardInterrupt:
-            log.info("Shutting down.")
+            log.info("Shutting down gracefully.")
+            notify("⛔ *Crypto Bridge stopped*")
             break
         except Exception as e:
             log.exception(f"Loop error: {e}")
 
+        log.info(f"Sleeping {LOOP_INTERVAL//60} min until next tick...")
         time.sleep(LOOP_INTERVAL)
 
 
