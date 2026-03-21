@@ -41,9 +41,6 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes
 )
-from telegram.request import AiohttpRequest
-from aiohttp_socks import ProxyConnector
-import aiohttp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -564,21 +561,18 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
-def main():
-    if not TELEGRAM_TOKEN:
-        log.error("TELEGRAM_BOT_TOKEN not set in .env")
-        return
-
-    log.info("🤖 OpenClaw v2 starting...")
-
+def _build_app() -> Application:
     if PROXY:
-        connector = ProxyConnector.from_url(PROXY)
-        session   = aiohttp.ClientSession(connector=connector)
-        request   = AiohttpRequest(aiohttp_session=session)
-        builder   = Application.builder().token(TELEGRAM_TOKEN).request(request)
+        import httpx
+        from telegram.request import HTTPXRequest
+        proxied_request = HTTPXRequest(
+            connection_pool_size=8,
+            proxy=PROXY.replace("socks5://", "socks5h://")
+        )
+        app = Application.builder().token(TELEGRAM_TOKEN).build()
+        app.bot._request = (proxied_request, proxied_request)
     else:
-        builder = Application.builder().token(TELEGRAM_TOKEN)
-    app = builder.build()
+        app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("help",      cmd_help))
     app.add_handler(CommandHandler("start",     cmd_help))
@@ -596,9 +590,27 @@ def main():
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, handle_message
     ))
+    return app
 
+
+async def run_bot():
+    app = _build_app()
+    if PROXY:
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await asyncio.Event().wait()
+    else:
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+def main():
+    if not TELEGRAM_TOKEN:
+        log.error("TELEGRAM_BOT_TOKEN not set in .env")
+        return
+    log.info("🤖 OpenClaw v2 starting...")
     log.info("OpenClaw v2 running — waiting for commands")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    asyncio.run(run_bot())
 
 
 if __name__ == "__main__":
