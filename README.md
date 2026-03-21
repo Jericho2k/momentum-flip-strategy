@@ -445,6 +445,13 @@ python bot/macd_adx_bridge.py
 python bot/openclaw_agent.py
 ```
 
+### Forex multi-pair bot (EUR/USD, GBP/USD, USD/JPY, USD/CHF)
+```bash
+python bot/forex_bridge.py
+```
+Requires a free OANDA practice account. Set `OANDA_API_KEY` and `OANDA_ACCOUNT_ID` in `.env`.
+Each pair runs independent MACD/ADX params with kill-hour and skip-Monday filters.
+
 ### Running the Backtester
 ```bash
 # Single backtest with default params
@@ -470,6 +477,7 @@ sol-trading-bot/
 │   ├── sol_skill.py          # Hybrid EMA/sentiment signal engine
 │   ├── bybit_bridge.py       # Live execution bridge (EMA/sentiment)
 │   ├── macd_adx_bridge.py    # Live execution bridge (MACD/ADX) ← primary
+│   ├── forex_bridge.py       # Multi-pair forex bridge (OANDA, 4 pairs)
 │   └── openclaw_agent.py     # Telegram AI oversight agent
 │
 ├── backtest/
