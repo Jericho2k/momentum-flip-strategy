@@ -41,6 +41,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes
 )
+from telegram.request import HTTPXRequest
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +55,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY", "")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 ANTHROPIC_KEY    = os.getenv("ANTHROPIC_API_KEY", "")
+PROXY            = os.getenv("PROXY", "")
 BASE_URL         = "https://api-demo.bybit.com"
 TRADE_LOG        = Path("trade_log_crypto.jsonl")
 PAUSE_FILE       = Path(".bridge_paused")  # bridge checks this file
@@ -567,7 +569,10 @@ def main():
 
     log.info("🤖 OpenClaw v2 starting...")
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    builder = Application.builder().token(TELEGRAM_TOKEN)
+    if PROXY:
+        builder = builder.request(HTTPXRequest(proxy=PROXY))
+    app = builder.build()
 
     app.add_handler(CommandHandler("help",      cmd_help))
     app.add_handler(CommandHandler("start",     cmd_help))
