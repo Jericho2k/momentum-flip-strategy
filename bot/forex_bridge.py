@@ -57,6 +57,7 @@ OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "")
 OANDA_BASE_URL   = "https://api-fxpractice.oanda.com"  # change to api-fxtrade for live
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+PROXY            = os.getenv("PROXY", "")
 
 LOOP_INTERVAL  = 900   # 15 minutes in seconds
 TRADE_LOG      = Path("trade_log_forex.jsonl")
@@ -103,11 +104,12 @@ def notify(message: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
-        httpx.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"},
-            timeout=5
-        )
+        proxies = {"http://": PROXY, "https://": PROXY} if PROXY else None
+        with httpx.Client(proxies=proxies, timeout=5) as client:
+            client.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+            )
     except Exception:
         pass
 

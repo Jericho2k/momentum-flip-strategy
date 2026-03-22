@@ -57,6 +57,7 @@ API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 BASE_URL   = "https://api-demo.bybit.com"
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+PROXY            = os.getenv("PROXY", "")
 
 LOOP_INTERVAL  = 900    # 15 minutes
 CANDLES_NEEDED = 300    # enough for all MACD warmup periods
@@ -102,11 +103,12 @@ def notify(msg: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
-        httpx.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"},
-            timeout=5
-        )
+        proxies = {"http://": PROXY, "https://": PROXY} if PROXY else None
+        with httpx.Client(proxies=proxies, timeout=5) as client:
+            client.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
+            )
     except Exception:
         pass
 
