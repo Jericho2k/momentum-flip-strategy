@@ -6,7 +6,7 @@
 
 ---
 ## System preview
-https://github.com/user-attachments/assets/ce43a729-1c44-4d42-b77b-8d1a12fbead5
+https://github.com/user-attachments/assets/67386a39-c221-477d-8d33-5b9892ced074
 
 ## Table of Contents
 
