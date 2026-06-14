@@ -5,6 +5,8 @@
 > Built as an independent research project to explore systematic trend-following on crypto perpetuals, with applications to forex and commodities markets.
 
 ---
+## System preview
+https://github.com/user-attachments/assets/ce43a729-1c44-4d42-b77b-8d1a12fbead5
 
 ## Table of Contents
 
